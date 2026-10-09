@@ -29,8 +29,14 @@ class ResQhunTApp : Application() {
         ResqHuntSyncClient(this, database)
     }
 
+    val locationManager: com.resqhunt.citizen.location.EmergencyLocationManager by lazy {
+        com.resqhunt.citizen.location.EmergencyLocationManager.getInstance(this)
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
+        com.resqhunt.citizen.service.AppLifecycleStateTracker.init(this)
+        com.resqhunt.citizen.alert.EmergencyAlertManager.createNotificationChannel(this)
     }
 }

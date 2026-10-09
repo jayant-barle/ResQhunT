@@ -1,5 +1,7 @@
 package com.resqhunt.citizen.ui.screens.sos
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,43 +22,53 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.resqhunt.citizen.ResQhunTApp
 import com.resqhunt.citizen.data.local.AppDatabase
-import com.resqhunt.citizen.data.local.entity.SosEntity
-import com.resqhunt.citizen.domain.model.DeliveryState
 import com.resqhunt.citizen.ui.theme.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
+enum class SimpleDeliveryStatus(val label: String, val level: Int) {
+    SAVED("Saved", 1),
+    SEARCHING("Searching", 2),
+    SENT_TO_NEARBY("Sent to nearby device", 3),
+    DELIVERED_TO_SERVER("Delivered to rescue server", 4);
+
+    companion object {
+        fun fromDeliveryState(deliveryState: String): SimpleDeliveryStatus {
+            return when (deliveryState) {
+                "CREATED", "STORED_LOCALLY" -> SAVED
+                "RELAY_PENDING", "TRANSFER_IN_PROGRESS", "RELAY_FAILED" -> SEARCHING
+                "RELAYED_TO_PEER", "RECEIVED_BY_PEER" -> SENT_TO_NEARBY
+                "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED" -> DELIVERED_TO_SERVER
+                else -> SAVED
+            }
+        }
+    }
+}
+
 @Composable
 fun SosDetailsScreen(
     requestId: String,
     database: AppDatabase,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNavigateToDiagnostics: () -> Unit = {},
+    onNavigateToNewSos: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as ResQhunTApp
     val syncClient = app.syncClient
-    val nearbyManager = app.nearbyManager
+    val relayEngine = app.relayEngine
     val coroutineScope = rememberCoroutineScope()
 
-    var sos by remember { mutableStateOf<SosEntity?>(null) }
+    val sos by remember(requestId) { database.sosDao().getSosByIdFlow(requestId) }.collectAsState(initial = null)
     val isSyncing by syncClient.isSyncing.collectAsState()
-    val lastSyncError by syncClient.lastSyncError.collectAsState()
-    val lastSyncSuccessTime by syncClient.lastSyncSuccessTime.collectAsState()
-    val connectedEndpoints by nearbyManager.connectedEndpoints.collectAsState()
-    val nearbyError by nearbyManager.lastError.collectAsState()
-
+    var isRetryingMesh by remember { mutableStateOf(false) }
     var syncFeedbackMessage by remember { mutableStateOf<String?>(null) }
 
     val refreshData: () -> Unit = {
         coroutineScope.launch {
-            sos = database.sosDao().getSosById(requestId)
-            // If online, query backend for any updated status from coordinators
             if (syncClient.isOnline()) {
-                val updatedState = syncClient.checkIncidentStatus(requestId)
-                if (updatedState != null) {
-                    sos = database.sosDao().getSosById(requestId)
-                }
+                syncClient.checkIncidentStatus(requestId)
             }
         }
     }
@@ -73,7 +85,7 @@ fun SosDetailsScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // App bar
+        // App Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -82,9 +94,14 @@ fun SosDetailsScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = NavyPrimary)
             }
-            Text("Emergency Beacon Tracker", fontSize = 16.sp, fontWeight = FontWeight.Black, color = NavyPrimary)
-            IconButton(onClick = { refreshData() }) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = NavyPrimary)
+            Text("Emergency SOS Status", fontSize = 17.sp, fontWeight = FontWeight.Black, color = NavyPrimary)
+            Row {
+                IconButton(onClick = onNavigateToDiagnostics) {
+                    Icon(Icons.Default.Build, contentDescription = "Developer Diagnostics", tint = NavyPrimary)
+                }
+                IconButton(onClick = { refreshData() }) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = NavyPrimary)
+                }
             }
         }
 
@@ -96,201 +113,315 @@ fun SosDetailsScreen(
         }
 
         val currentSos = sos!!
-        val currentState = currentSos.deliveryState
+        val currentStatus = SimpleDeliveryStatus.fromDeliveryState(currentSos.deliveryState)
 
-        // Status Card
+        // 1. Emergency Message, Type, and Priority Card
         Card(
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(22.dp),
             colors = CardDefaults.cardColors(containerColor = NavyPrimary),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // Emergency Type & Priority
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = EmergencyRed.copy(alpha = 0.25f)
+                    ) {
+                        Text(
+                            text = currentSos.category,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+
                     Text(
-                        text = currentSos.category,
-                        color = EmergencyLight,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                    Text(
-                        text = "Priority Score: ${currentSos.priorityScore.toInt()}/100",
+                        text = "Priority: ${currentSos.priorityCategory} (${currentSos.priorityScore.toInt()}/100)",
                         color = TealAccent,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
+                // Emergency Message
                 Text(
                     text = currentSos.description,
                     color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 22.sp
                 )
 
+                Text(
+                    text = "ID: ${currentSos.requestId.take(16)}...",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 11.sp,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+        }
+
+        // 2. Simple Delivery Status Card
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = CardSurface),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "ID: ${currentSos.requestId.take(16)}...",
-                        color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 11.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                    )
+                    Text("Delivery Status", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MutedGray)
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = when (currentState) {
-                            "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED" -> TealAccent.copy(alpha = 0.2f)
-                            "RELAYED_TO_PEER", "RECEIVED_BY_PEER" -> TealAccent.copy(alpha = 0.2f)
-                            "TRANSFER_IN_PROGRESS" -> Color.Yellow.copy(alpha = 0.2f)
-                            "RELAY_FAILED" -> EmergencyRed.copy(alpha = 0.2f)
-                            else -> CanvasBg.copy(alpha = 0.15f)
+                        color = when (currentStatus) {
+                            SimpleDeliveryStatus.DELIVERED_TO_SERVER -> TealAccent.copy(alpha = 0.2f)
+                            SimpleDeliveryStatus.SENT_TO_NEARBY -> TealAccent.copy(alpha = 0.2f)
+                            SimpleDeliveryStatus.SEARCHING -> Color(0xFFFFB300).copy(alpha = 0.2f)
+                            SimpleDeliveryStatus.SAVED -> NavyPrimary.copy(alpha = 0.1f)
                         }
                     ) {
                         Text(
-                            text = currentState.replace("_", " "),
-                            color = when (currentState) {
-                                "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED" -> TealAccent
-                                "RELAYED_TO_PEER", "RECEIVED_BY_PEER" -> TealAccent
-                                "TRANSFER_IN_PROGRESS" -> Color.Yellow
-                                "RELAY_FAILED" -> EmergencyLight
-                                else -> Color.White
-                            },
-                            fontSize = 10.sp,
+                            text = currentStatus.label,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Black,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            color = when (currentStatus) {
+                                SimpleDeliveryStatus.DELIVERED_TO_SERVER -> TealDark
+                                SimpleDeliveryStatus.SENT_TO_NEARBY -> TealDark
+                                SimpleDeliveryStatus.SEARCHING -> Color(0xFFD87A00)
+                                SimpleDeliveryStatus.SAVED -> NavyPrimary
+                            },
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
+                    }
+                }
+
+                // Clean 4-Stage Horizontal Delivery Flow
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val statuses = SimpleDeliveryStatus.values()
+                    statuses.forEachIndexed { index, status ->
+                        val isReached = currentStatus.level >= status.level
+                        val isCurrent = currentStatus == status
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when {
+                                            isCurrent -> EmergencyRed
+                                            isReached -> TealDark
+                                            else -> Color.LightGray.copy(alpha = 0.4f)
+                                        }
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isReached && !isCurrent) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                } else if (isCurrent) {
+                                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.White))
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = status.label,
+                                fontSize = 9.sp,
+                                fontWeight = if (isCurrent) FontWeight.Black else FontWeight.SemiBold,
+                                color = if (isCurrent) EmergencyRed else if (isReached) NavyPrimary else MutedGray,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                lineHeight = 11.sp
+                            )
+                        }
+
+                        if (index < statuses.size - 1) {
+                            Box(
+                                modifier = Modifier
+                                    .height(2.dp)
+                                    .weight(0.4f)
+                                    .background(if (currentStatus.level > status.level) TealDark else Color.LightGray.copy(alpha = 0.4f))
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Stepper: Honest Delivery State Machine
-        Text(
-            text = "Delivery State Machine",
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            color = NavyPrimary
-        )
+        // 3. Last-Known Location and Timestamp Card
+        val lat = currentSos.latitude
+        val lon = currentSos.longitude
+        val hasValidLocation = lat != null && lon != null &&
+                (lat != 0.0 || lon != 0.0) &&
+                !lat.isNaN() && !lon.isNaN() &&
+                currentSos.locationSource != "UNAVAILABLE"
 
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = CardSurface),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                // 1. Saved locally
-                StepItem(
-                    title = "1. SAVED LOCALLY",
-                    subtitle = "Persisted to Room SQLite database (zero-data-loss guarantee)",
-                    isCompleted = true,
-                    isCurrent = currentState in listOf("CREATED", "STORED_LOCALLY")
-                )
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = if (hasValidLocation) EmergencyRed else MutedGray,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "Last-Known Location",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = NavyPrimary
+                        )
+                    }
 
-                // 2. Searching
-                StepItem(
-                    title = "2. SEARCHING FOR PEERS",
-                    subtitle = "Nearby cluster BLE beacon & Wi-Fi Direct scanning active",
-                    isCompleted = currentState !in listOf("CREATED", "STORED_LOCALLY", "RELAY_PENDING"),
-                    isCurrent = currentState == "RELAY_PENDING"
-                )
+                    if (hasValidLocation) {
+                        val sourceLabel = when (currentSos.locationSource) {
+                            "FRESH_GPS" -> "FRESH GPS"
+                            "LAST_KNOWN" -> "LAST KNOWN"
+                            "MANUAL" -> "MANUAL NOTE"
+                            else -> "GPS FIX"
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = TealAccent.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = sourceLabel,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                                color = TealDark,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
 
-                // 3. Transfer in progress
-                StepItem(
-                    title = "3. TRANSFER IN PROGRESS",
-                    subtitle = "Payload currently transmitting to connected adjacent peer",
-                    isCompleted = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER", "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
-                    isCurrent = currentState == "TRANSFER_IN_PROGRESS"
-                )
+                if (hasValidLocation && lat != null && lon != null) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Coordinates:", fontSize = 12.sp, color = MutedGray)
+                        Text(
+                            text = String.format(Locale.US, "%.6f°, %.6f°", lat, lon),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = NavyPrimary
+                        )
+                    }
 
-                // 4. Relayed to peer / Received by peer (ACK Confirmed)
-                StepItem(
-                    title = "4. CONFIRMED BY PEER (ACK)",
-                    subtitle = if (currentState == "RECEIVED_BY_PEER") "Received from mesh peer and persisted to local Room DB" else "Application-level ACK received from adjacent physical Android phone",
-                    isCompleted = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER", "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
-                    isCurrent = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER")
-                )
+                    val locTime = currentSos.locationTimestamp ?: currentSos.createdAt
+                    val timeSdf = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Fix Timestamp:", fontSize = 12.sp, color = MutedGray)
+                        Text(
+                            text = timeSdf.format(Date(locTime)),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = InkText
+                        )
+                    }
 
-                // 5. Server Received
-                StepItem(
-                    title = "5. SERVER RECEIVED",
-                    subtitle = "Uploaded to central cloud backend by gateway node (Confirmed by API)",
-                    isCompleted = currentState in listOf("SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
-                    isCurrent = currentState == "SERVER_RECEIVED"
-                )
+                    if (!currentSos.locationAddress.isNullOrBlank()) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Landmark / Note:", fontSize = 12.sp, color = MutedGray)
+                            Text(
+                                text = currentSos.locationAddress!!,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = InkText,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
 
-                // 6. Coordinator Acknowledged
-                StepItem(
-                    title = "6. COORDINATOR ACKNOWLEDGED",
-                    subtitle = "Rescue coordinator triaged and acknowledged incident in dashboard",
-                    isCompleted = currentState in listOf("COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
-                    isCurrent = currentState == "COORDINATOR_ACKNOWLEDGED"
-                )
-
-                // 7. Assigned / In Progress
-                StepItem(
-                    title = "7. ASSIGNED & IN PROGRESS",
-                    subtitle = "Disaster volunteer team deployed with equipment",
-                    isCompleted = currentState in listOf("ASSIGNED", "IN_PROGRESS", "RESOLVED"),
-                    isCurrent = currentState in listOf("ASSIGNED", "IN_PROGRESS")
-                )
-
-                // 8. Resolved
-                StepItem(
-                    title = "8. RESOLVED",
-                    subtitle = "Emergency situation resolved by emergency services",
-                    isCompleted = currentState == "RESOLVED",
-                    isCurrent = currentState == "RESOLVED"
-                )
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                val uri = Uri.parse("geo:$lat,$lon?q=$lat,$lon(Emergency+Beacon)")
+                                val mapIntent = Intent(Intent.ACTION_VIEW, uri)
+                                mapIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(mapIntent)
+                            } catch (e: Exception) {
+                                val webUri = Uri.parse("https://maps.google.com/?q=$lat,$lon")
+                                val webIntent = Intent(Intent.ACTION_VIEW, webUri)
+                                webIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                try {
+                                    context.startActivity(webIntent)
+                                } catch (_: Exception) {}
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
+                    ) {
+                        Icon(Icons.Default.Place, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Open Coordinates in Maps", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Text(
+                        text = "Location unavailable. GPS lock was not acquired at the time of transmission.",
+                        fontSize = 12.sp,
+                        color = MutedGray
+                    )
+                }
             }
         }
 
-        // Diagnostics Card
-        Card(
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = CardSurface),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Sync & Mesh Diagnostics", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
-
-                DiagnosticRow(label = "Connected Peers:", value = "${connectedEndpoints.size} active node(s)")
-                DiagnosticRow(label = "Internet State:", value = if (syncClient.isOnline()) "ONLINE" else "OFFLINE (Mesh Relay Active)")
-                DiagnosticRow(label = "Gateway Target:", value = syncClient.baseUrl)
-
-                val lastSyncTime = lastSyncSuccessTime
-                if (lastSyncTime != null) {
-                    val sdf = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-                    DiagnosticRow(label = "Last Successful Sync:", value = sdf.format(Date(lastSyncTime)))
-                }
-
-                if (!nearbyError.isNullOrBlank()) {
-                    Text(
-                        text = "Nearby Note: $nearbyError",
-                        fontSize = 11.sp,
-                        color = EmergencyRed,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                if (!lastSyncError.isNullOrBlank()) {
-                    Text(
-                        text = "Gateway Status: $lastSyncError",
-                        fontSize = 11.sp,
-                        color = EmergencyRed,
-                        fontWeight = FontWeight.SemiBold
-                    )
+        // 4. Primary Actions & SOS Controls
+        if (currentStatus == SimpleDeliveryStatus.SEARCHING) {
+            Button(
+                onClick = {
+                    coroutineScope.launch {
+                        isRetryingMesh = true
+                        relayEngine.retrySosTransmission(requestId)
+                        isRetryingMesh = false
+                    }
+                },
+                enabled = !isRetryingMesh,
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+            ) {
+                if (isRetryingMesh) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Broadcasting to Nearby Devices...", fontWeight = FontWeight.Bold)
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Retry Search for Nearby Devices", fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        // Direct Gateway Upload Button
-        Button(
+        // Gateway Sync Button
+        OutlinedButton(
             onClick = {
                 coroutineScope.launch {
                     syncFeedbackMessage = null
@@ -300,20 +431,20 @@ fun SosDetailsScreen(
                 }
             },
             enabled = !isSyncing,
-            colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(48.dp)
         ) {
             if (isSyncing) {
-                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                Spacer(modifier = Modifier.width(10.dp))
-                Text("Syncing with Cloud Gateway...", fontWeight = FontWeight.Bold)
-            } else {
-                Icon(Icons.Default.CloudUpload, contentDescription = null)
+                CircularProgressIndicator(color = NavyPrimary, modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Attempt Direct Gateway Sync", fontWeight = FontWeight.Bold)
+                Text("Syncing with Rescue Server...", fontWeight = FontWeight.Bold)
+            } else {
+                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Attempt Cloud Server Upload", fontWeight = FontWeight.Bold)
             }
         }
 
@@ -326,63 +457,29 @@ fun SosDetailsScreen(
                 modifier = Modifier.padding(horizontal = 4.dp)
             )
         }
-    }
-}
 
-@Composable
-fun DiagnosticRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(text = label, fontSize = 11.sp, color = MutedGray)
-        Text(text = value, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = InkText)
-    }
-}
-
-@Composable
-fun StepItem(
-    title: String,
-    subtitle: String,
-    isCompleted: Boolean,
-    isCurrent: Boolean
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Box(
+        // Trigger New Emergency Button
+        Button(
+            onClick = onNavigateToNewSos,
+            colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary),
+            shape = RoundedCornerShape(16.dp),
             modifier = Modifier
-                .size(24.dp)
-                .clip(CircleShape)
-                .background(
-                    if (isCompleted) TealAccent
-                    else if (isCurrent) EmergencyRed
-                    else Color.LightGray.copy(alpha = 0.4f)
-                ),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .height(50.dp)
         ) {
-            if (isCompleted) {
-                Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-            } else if (isCurrent) {
-                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.White))
-            }
+            Icon(Icons.Default.Warning, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Trigger New Emergency SOS", fontWeight = FontWeight.Bold)
         }
 
-        Column {
-            Text(
-                text = title,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
-                color = if (isCurrent) EmergencyRed else if (isCompleted) NavyPrimary else MutedGray
-            )
-            Text(
-                text = subtitle,
-                fontSize = 11.sp,
-                color = MutedGray,
-                lineHeight = 15.sp
-            )
+        // Link to Separate Developer/Debug Screen
+        TextButton(
+            onClick = onNavigateToDiagnostics,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp), tint = MutedGray)
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Open Developer & Mesh Diagnostics", color = MutedGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

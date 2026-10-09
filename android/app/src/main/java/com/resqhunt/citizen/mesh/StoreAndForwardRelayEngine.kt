@@ -2,6 +2,7 @@ package com.resqhunt.citizen.mesh
 
 import android.content.Context
 import android.util.Log
+import com.resqhunt.citizen.alert.EmergencyAlertManager
 import com.resqhunt.citizen.data.local.AppDatabase
 import com.resqhunt.citizen.data.local.entity.PeerEntity
 import com.resqhunt.citizen.data.local.entity.RelayMessageEntity
@@ -15,8 +16,11 @@ import com.resqhunt.citizen.domain.model.SeverityLevel
 import com.resqhunt.citizen.domain.priority.DeterministicPriorityEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class StoreAndForwardRelayEngine(
     private val context: Context,
@@ -28,13 +32,25 @@ class StoreAndForwardRelayEngine(
         const val MAX_ALLOWED_HOPS = 5
         const val SUPPORTED_PROTOCOL_VERSION = 1
         const val MAX_PAYLOAD_BYTES = 100 * 1024 // 100 KB limit for mesh envelopes
+        const val ACK_TIMEOUT_MS = 14000L // 14 seconds ACK timeout per attempt
+        const val MAX_SEND_ATTEMPTS = 3
     }
 
     private val scope = CoroutineScope(Dispatchers.IO)
     val deviceId: String get() = nearbyManager.localDeviceId
 
+    data class OutgoingSosSession(
+        val messageId: String,
+        val requestId: String,
+        val rawEnvelopeJson: String,
+        var attempt: Int = 1,
+        var timeoutJob: Job? = null
+    )
+
+    private val activeOutgoingSessions = ConcurrentHashMap<String, OutgoingSosSession>()
+
     init {
-        // Wire nearby connection listeners
+        // Wire nearby connection callbacks
         nearbyManager.onPayloadReceived = { bytes, sourceEndpointId ->
             scope.launch {
                 handleInboundPayload(bytes, sourceEndpointId)
@@ -63,9 +79,26 @@ class StoreAndForwardRelayEngine(
 
         nearbyManager.onPeerDisconnected = { endpointId ->
             scope.launch {
+                Log.i(TAG, "Peer disconnected: $endpointId. Updating database...")
                 database.peerDao().updateConnectionState(endpointId, false)
             }
         }
+    }
+
+    /**
+     * Checks if a delivery state is terminal or already confirmed by peer/server.
+     * Prevents race conditions from downgrading an acknowledged state.
+     */
+    fun isTerminalOrRelayed(state: String): Boolean {
+        return state in listOf(
+            DeliveryState.RELAYED_TO_PEER.name,
+            DeliveryState.RECEIVED_BY_PEER.name,
+            DeliveryState.SERVER_RECEIVED.name,
+            DeliveryState.COORDINATOR_ACKNOWLEDGED.name,
+            DeliveryState.ASSIGNED.name,
+            DeliveryState.IN_PROGRESS.name,
+            DeliveryState.RESOLVED.name
+        )
     }
 
     /**
@@ -82,7 +115,9 @@ class StoreAndForwardRelayEngine(
             latitude = sos.latitude,
             longitude = sos.longitude,
             locationAccuracy = sos.locationAccuracy,
-            locationAddress = sos.locationAddress
+            locationAddress = sos.locationAddress,
+            locationTimestamp = sos.locationTimestamp,
+            locationSource = sos.locationSource
         )
 
         val rawContentForChecksum = "${sos.requestId}:${sos.category}:${sos.severity}:${sos.affectedCount}:${sos.description}"
@@ -104,6 +139,9 @@ class StoreAndForwardRelayEngine(
 
         val json = envelope.toJson()
 
+        val connectedPeers = nearbyManager.connectedEndpoints.value
+        val forwardedStr = connectedPeers.joinToString(",")
+
         // 2. Persist to Room local database first (Offline-first guarantee)
         val relayRecord = RelayMessageEntity(
             messageId = messageId,
@@ -113,24 +151,44 @@ class StoreAndForwardRelayEngine(
             maxHops = MAX_ALLOWED_HOPS,
             expiresAt = envelope.expiresAt,
             rawJsonEnvelope = json,
-            status = "PENDING_FORWARD"
+            status = if (connectedPeers.isNotEmpty()) "SENDING" else "PENDING_FORWARD",
+            lastReceivedFromEndpointId = null,
+            forwardedEndpoints = forwardedStr
         )
         database.relayMessageDao().insertMessage(relayRecord)
 
-        // 3. Update SOS delivery status to RELAY_PENDING initially (Searching)
+        // 3. Update SOS delivery status to RELAY_PENDING initially
         database.sosDao().updateDeliveryState(sos.requestId, DeliveryState.RELAY_PENDING.name)
 
-        // 4. Broadcast to any connected nearby peers
-        val connectedPeers = nearbyManager.connectedEndpoints.value
+        // 4. Setup outgoing session with ACK timeout
+        val session = OutgoingSosSession(
+            messageId = messageId,
+            requestId = sos.requestId,
+            rawEnvelopeJson = json,
+            attempt = 1
+        )
+        activeOutgoingSessions[messageId] = session
+
+        // 5. Broadcast to connected peers if any
         if (connectedPeers.isNotEmpty()) {
             val bytes = json.toByteArray(Charsets.UTF_8)
-            val peerCount = nearbyManager.broadcastPayload(bytes)
-            if (peerCount > 0) {
-                // Mark transfer in progress; DO NOT mark RELAYED_TO_PEER until ACK received
-                database.sosDao().updateDeliveryState(sos.requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
-                database.relayMessageDao().updateStatus(messageId, "SENDING")
-                Log.i(TAG, "Emergency ${sos.requestId} dispatched to $peerCount peer(s), awaiting ACK")
+            database.sosDao().updateDeliveryState(sos.requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
+
+            startAckTimeout(session)
+
+            for (peer in connectedPeers) {
+                nearbyManager.sendTrackedPayload(
+                    endpointId = peer,
+                    bytes = bytes,
+                    onTransferSuccess = {
+                        Log.i(TAG, "Payload bytes physically transferred to $peer for message $messageId. Awaiting application ACK...")
+                    },
+                    onTransferFailure = { status ->
+                        Log.w(TAG, "Physical byte transfer failed to peer $peer (status $status) for message $messageId")
+                    }
+                )
             }
+            Log.i(TAG, "Emergency ${sos.requestId} dispatched to ${connectedPeers.size} peer(s), awaiting application ACK.")
         } else {
             Log.i(TAG, "No peers currently connected. Message ${sos.requestId} buffered in Room pending peer discovery.")
         }
@@ -139,7 +197,54 @@ class StoreAndForwardRelayEngine(
     }
 
     /**
-     * Ingests, validates, deduplicates, persists, and store-and-forwards inbound payloads from peers.
+     * Manages ACK timeouts and retries for an outgoing SOS session.
+     */
+    private fun startAckTimeout(session: OutgoingSosSession) {
+        session.timeoutJob?.cancel()
+        session.timeoutJob = scope.launch {
+            delay(ACK_TIMEOUT_MS)
+
+            // Check if already acknowledged in Room
+            val currentRelayMsg = database.relayMessageDao().getMessageById(session.messageId)
+            if (currentRelayMsg?.status == "ACKNOWLEDGED") {
+                Log.d(TAG, "Message ${session.messageId} already ACKNOWLEDGED. Cancelling timeout.")
+                activeOutgoingSessions.remove(session.messageId)
+                return@launch
+            }
+
+            val currentSos = database.sosDao().getSosById(session.requestId)
+            if (currentSos != null && isTerminalOrRelayed(currentSos.deliveryState)) {
+                Log.d(TAG, "Request ${session.requestId} is in state ${currentSos.deliveryState}. No retry needed.")
+                activeOutgoingSessions.remove(session.messageId)
+                return@launch
+            }
+
+            Log.w(TAG, "ACK timeout expired for message ${session.messageId} (attempt ${session.attempt}/$MAX_SEND_ATTEMPTS)")
+            val connectedPeers = nearbyManager.connectedEndpoints.value
+
+            if (session.attempt < MAX_SEND_ATTEMPTS && connectedPeers.isNotEmpty()) {
+                session.attempt += 1
+                Log.i(TAG, "Retrying SOS broadcast for ${session.requestId} (attempt ${session.attempt})...")
+                database.sosDao().updateDeliveryState(session.requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
+                val bytes = session.rawEnvelopeJson.toByteArray(Charsets.UTF_8)
+                startAckTimeout(session)
+
+                for (peer in connectedPeers) {
+                    nearbyManager.sendTrackedPayload(peer, bytes)
+                }
+            } else {
+                Log.w(TAG, "ACK not received for message ${session.messageId}. Moving to RELAY_FAILED while keeping buffered.")
+                if (currentSos != null && !isTerminalOrRelayed(currentSos.deliveryState)) {
+                    database.sosDao().updateDeliveryState(session.requestId, DeliveryState.RELAY_FAILED.name)
+                    database.relayMessageDao().updateStatus(session.messageId, "PENDING_FORWARD")
+                }
+                activeOutgoingSessions.remove(session.messageId)
+            }
+        }
+    }
+
+    /**
+     * Ingests, validates, deduplicates, persists, sends ACK, and store-and-forwards inbound payloads.
      */
     suspend fun handleInboundPayload(bytes: ByteArray, sourceEndpointId: String): Boolean {
         // 1. Size guard
@@ -163,25 +268,38 @@ class StoreAndForwardRelayEngine(
             return false
         }
 
-        // Handle Application-Level ACK
+        // 4. Handle Application-Level ACK
         if (envelope.messageType == "SOS_ACK") {
             val ackedMessageId = envelope.ackForMessageId
             if (ackedMessageId != null) {
                 Log.i(TAG, "Received SOS_ACK for message $ackedMessageId (request ${envelope.requestId}) from endpoint $sourceEndpointId (node ${envelope.originDeviceId})")
-                database.relayMessageDao().updateStatus(ackedMessageId, "ACKNOWLEDGED")
-                database.sosDao().updateDeliveryState(envelope.requestId, DeliveryState.RELAYED_TO_PEER.name)
-                return true
+
+                // Match against local message database
+                val localMsg = database.relayMessageDao().getMessageById(ackedMessageId)
+                if (localMsg != null) {
+                    // Cancel active timeout job
+                    val session = activeOutgoingSessions.remove(ackedMessageId)
+                    session?.timeoutJob?.cancel()
+
+                    database.relayMessageDao().updateStatus(ackedMessageId, "ACKNOWLEDGED")
+                    database.sosDao().updateDeliveryState(envelope.requestId, DeliveryState.RELAYED_TO_PEER.name)
+                    Log.i(TAG, "Successfully matched ACK for message $ackedMessageId! Updated request ${envelope.requestId} to RELAYED_TO_PEER.")
+                    return true
+                } else {
+                    Log.w(TAG, "Received ACK for unknown or untracked messageId: $ackedMessageId. Dropping.")
+                    return false
+                }
             }
             return false
         }
 
-        // 4. Expiration check
+        // 5. Expiration check
         if (envelope.isExpired()) {
             Log.w(TAG, "Message ${envelope.messageId} is expired. Dropping.")
             return false
         }
 
-        // 5. Hop limit check
+        // 6. Hop limit check
         if (envelope.hasExceededHops()) {
             Log.w(TAG, "Message ${envelope.messageId} reached maximum hops (${envelope.hopCount}/${envelope.maxHops}). Dropping to prevent broadcast storms.")
             return false
@@ -193,7 +311,7 @@ class StoreAndForwardRelayEngine(
             return false
         }
 
-        // 6. Verify Integrity Hash
+        // 7. Verify Integrity Hash
         val rawContentForChecksum = "${envelope.requestId}:${payload.category}:${payload.severity}:${payload.affectedCount}:${payload.description}"
         val expectedChecksum = MeshMessageEnvelope.calculateChecksum(rawContentForChecksum)
         if (envelope.integrity.checksum != expectedChecksum) {
@@ -201,28 +319,35 @@ class StoreAndForwardRelayEngine(
             return false
         }
 
-        // 7. Deduplication Check (Loop & Replay prevention)
+        // 8. Deduplication Check (Loop & Replay prevention)
         val alreadySeen = database.relayMessageDao().hasMessage(envelope.messageId)
         if (alreadySeen > 0) {
-            Log.d(TAG, "Duplicate message ${envelope.messageId} already recorded. Re-sending ACK to $sourceEndpointId in case prior ACK was lost.")
+            Log.d(TAG, "Duplicate message ${envelope.messageId} already recorded. Re-sending ACK to $sourceEndpointId without duplicate storage or alert.")
             sendAck(envelope.messageId, envelope.requestId, sourceEndpointId)
             return true
         }
 
-        // 8. Persist to local Room database: Relay record
+        // 9. Multi-hop Envelope Preparation: Increment hop count for subsequent relaying
+        val nextHopEnvelope = envelope.nextHopEnvelope()
+        val nextHopJson = nextHopEnvelope.toJson()
+        val nextHopBytes = nextHopJson.toByteArray(Charsets.UTF_8)
+
+        // 10. Persist to local Room database: Relay record with next-hop envelope and previous-hop source
         val relayRecord = RelayMessageEntity(
             messageId = envelope.messageId,
             requestId = envelope.requestId,
             originDeviceId = envelope.originDeviceId,
-            hopCount = envelope.hopCount,
+            hopCount = nextHopEnvelope.hopCount,
             maxHops = envelope.maxHops,
             expiresAt = envelope.expiresAt,
-            rawJsonEnvelope = json,
-            status = "PENDING_FORWARD"
+            rawJsonEnvelope = nextHopJson,
+            status = "PENDING_FORWARD",
+            lastReceivedFromEndpointId = sourceEndpointId,
+            forwardedEndpoints = ""
         )
         database.relayMessageDao().insertMessage(relayRecord)
 
-        // 9. Persist to local Room database: SOS record so receiver's UI and local database displays the emergency!
+        // 11. Persist to local Room database: SOS record so receiver's UI displays the emergency
         val categoryEnum = try { EmergencyCategory.valueOf(payload.category) } catch (e: Exception) { EmergencyCategory.OTHER }
         val severityEnum = try { SeverityLevel.valueOf(payload.severity) } catch (e: Exception) { SeverityLevel.MEDIUM }
         val evaluation = DeterministicPriorityEngine.evaluate(
@@ -233,7 +358,7 @@ class StoreAndForwardRelayEngine(
         )
 
         val existingSos = database.sosDao().getSosById(envelope.requestId)
-        if (existingSos == null) {
+        val sosEntityToAlert: SosEntity = if (existingSos == null) {
             val receivedSos = SosEntity(
                 requestId = envelope.requestId,
                 category = payload.category,
@@ -244,6 +369,8 @@ class StoreAndForwardRelayEngine(
                 longitude = payload.longitude,
                 locationAccuracy = payload.locationAccuracy,
                 locationAddress = payload.locationAddress,
+                locationTimestamp = payload.locationTimestamp ?: envelope.createdAt,
+                locationSource = payload.locationSource ?: if (payload.latitude != null) "LAST_KNOWN" else "UNAVAILABLE",
                 deliveryState = DeliveryState.RECEIVED_BY_PEER.name,
                 priorityScore = evaluation.priorityScore,
                 priorityCategory = evaluation.priorityCategory.name,
@@ -252,37 +379,60 @@ class StoreAndForwardRelayEngine(
             )
             database.sosDao().insertSos(receivedSos)
             Log.i(TAG, "Saved incoming mesh emergency ${envelope.requestId} to Room database (state: RECEIVED_BY_PEER)")
+            receivedSos
         } else {
-            // Already present, ensure state reflects that it was relayed
-            if (existingSos.deliveryState == DeliveryState.RELAY_PENDING.name ||
-                existingSos.deliveryState == DeliveryState.TRANSFER_IN_PROGRESS.name) {
+            if (!isTerminalOrRelayed(existingSos.deliveryState)) {
                 database.sosDao().updateDeliveryState(envelope.requestId, DeliveryState.RELAYED_TO_PEER.name)
             }
+            existingSos
         }
 
-        // 10. Send Application-Level ACK back to the sender
+        // 12. Send Application-Level ACK back to the immediate sender ONLY AFTER database persistence
         sendAck(envelope.messageId, envelope.requestId, sourceEndpointId)
 
-        // 11. Multi-hop Store-and-Forward: Forward to other connected peers (excluding the sender)
-        if (envelope.hopCount < envelope.maxHops) {
-            val nextHopEnvelope = envelope.nextHopEnvelope()
-            val nextHopBytes = nextHopEnvelope.toJson().toByteArray(Charsets.UTF_8)
+        // 13. Trigger Emergency Audio & Vibration Alert on Receiver
+        scope.launch(Dispatchers.Main) {
+            EmergencyAlertManager.triggerSosAlert(context, sosEntityToAlert, envelope.originDeviceId)
+        }
+
+        // 14. Multi-hop Store-and-Forward: Forward nextHopEnvelope to other connected peers (excluding sourceEndpointId)
+        if (nextHopEnvelope.hopCount <= nextHopEnvelope.maxHops) {
             val connectedPeers = nearbyManager.connectedEndpoints.value
+            val eligiblePeers = connectedPeers.filter { it != sourceEndpointId }
 
-            var forwardedCount = 0
-            for (peer in connectedPeers) {
-                if (peer != sourceEndpointId) {
-                    nearbyManager.sendPayload(peer, nextHopBytes)
-                    forwardedCount++
+            if (eligiblePeers.isNotEmpty()) {
+                val session = OutgoingSosSession(
+                    messageId = envelope.messageId,
+                    requestId = envelope.requestId,
+                    rawEnvelopeJson = nextHopJson,
+                    attempt = 1
+                )
+                activeOutgoingSessions[envelope.messageId] = session
+                startAckTimeout(session)
+
+                val forwardedPeersList = mutableListOf<String>()
+                for (peer in eligiblePeers) {
+                    nearbyManager.sendTrackedPayload(
+                        endpointId = peer,
+                        bytes = nextHopBytes,
+                        onTransferSuccess = {
+                            Log.i(TAG, "Multi-hop envelope ${envelope.messageId} (hop ${nextHopEnvelope.hopCount}) transferred to peer $peer")
+                        },
+                        onTransferFailure = { status ->
+                            Log.w(TAG, "Multi-hop transfer to peer $peer failed (status $status) for message ${envelope.messageId}")
+                        }
+                    )
+                    forwardedPeersList.add(peer)
                 }
-            }
 
-            if (forwardedCount > 0) {
-                database.relayMessageDao().updateStatus(envelope.messageId, "FORWARDED")
-                Log.i(TAG, "Multi-hop forwarded message ${envelope.messageId} (hop ${nextHopEnvelope.hopCount}) to $forwardedCount peer(s)")
+                val forwardedStr = forwardedPeersList.joinToString(",")
+                database.relayMessageDao().updateStatusAndEndpoints(envelope.messageId, "FORWARDED", forwardedStr)
+                Log.i(TAG, "Multi-hop forwarded message ${envelope.messageId} (hop ${nextHopEnvelope.hopCount}/${nextHopEnvelope.maxHops}) to ${eligiblePeers.size} peer(s), excluding sender $sourceEndpointId")
             } else {
-                Log.d(TAG, "Message ${envelope.messageId} queued in Room for future peer encounters.")
+                Log.i(TAG, "No other connected peers currently available. Message ${envelope.messageId} buffered in Room outbox (hop ${nextHopEnvelope.hopCount}) for future peer discovery.")
             }
+        } else {
+            Log.i(TAG, "Message ${envelope.messageId} reached maximum hops (${nextHopEnvelope.hopCount}/${nextHopEnvelope.maxHops}). Will not forward further.")
         }
 
         return true
@@ -295,41 +445,76 @@ class StoreAndForwardRelayEngine(
             receiverDeviceId = deviceId
         )
         val ackBytes = ackEnvelope.toJson().toByteArray(Charsets.UTF_8)
-        nearbyManager.sendPayload(
-            targetEndpointId,
-            ackBytes,
-            onSuccess = {
-                Log.d(TAG, "Sent application ACK for $originalMessageId to endpoint $targetEndpointId")
+        nearbyManager.sendTrackedPayload(
+            endpointId = targetEndpointId,
+            bytes = ackBytes,
+            onEnqueued = {
+                Log.d(TAG, "Enqueued application ACK for $originalMessageId to endpoint $targetEndpointId")
             },
-            onFailure = { e ->
-                Log.w(TAG, "Failed to send application ACK to endpoint $targetEndpointId: ${e.message}")
+            onTransferSuccess = {
+                Log.i(TAG, "Application ACK for $originalMessageId physically delivered to endpoint $targetEndpointId")
+            },
+            onTransferFailure = { status ->
+                Log.w(TAG, "Physical transfer of application ACK for $originalMessageId to endpoint $targetEndpointId failed (status $status)")
             }
         )
     }
 
     /**
      * Retries forwarding queued offline messages when a specific peer connects.
+     * Excludes the peer if it was the previous-hop sender or if this message was already sent to it.
      */
     suspend fun flushPendingOutboxToPeer(endpointId: String) {
         val pending = database.relayMessageDao().getEligibleForwardMessages()
         if (pending.isEmpty()) return
 
-        Log.i(TAG, "Flushing ${pending.size} eligible queued messages to newly connected peer $endpointId")
+        val now = System.currentTimeMillis()
         for (msg in pending) {
+            // Exclude previous-hop sender (prevent echo loops)
+            if (msg.lastReceivedFromEndpointId == endpointId) {
+                Log.d(TAG, "Skipping flush of message ${msg.messageId} to $endpointId: Endpoint was the previous-hop sender.")
+                continue
+            }
+
+            // Exclude peers that have already received this message
+            val forwardedSet = msg.forwardedEndpoints.split(",").filter { it.isNotBlank() }.toSet()
+            if (forwardedSet.contains(endpointId)) {
+                Log.d(TAG, "Skipping flush of message ${msg.messageId} to $endpointId: Already forwarded to this peer.")
+                continue
+            }
+
+            // Check hop limit and expiry
+            if (msg.hopCount >= msg.maxHops || msg.expiresAt <= now) {
+                continue
+            }
+
+            Log.i(TAG, "Flushing queued message ${msg.messageId} (hop ${msg.hopCount}/${msg.maxHops}) to newly connected peer $endpointId")
+
+            val currentSos = database.sosDao().getSosById(msg.requestId)
+            val shouldUpdateSos = currentSos != null && !isTerminalOrRelayed(currentSos.deliveryState)
+
+            if (shouldUpdateSos) {
+                database.sosDao().updateDeliveryState(msg.requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
+            }
+
+            val session = OutgoingSosSession(msg.messageId, msg.requestId, msg.rawJsonEnvelope, 1)
+            startAckTimeout(session)
+            activeOutgoingSessions[msg.messageId] = session
+
             val bytes = msg.rawJsonEnvelope.toByteArray(Charsets.UTF_8)
-            nearbyManager.sendPayload(
-                endpointId,
-                bytes,
-                onSuccess = {
-                    scope.launch {
-                        database.relayMessageDao().updateStatus(msg.messageId, "SENDING")
-                        database.sosDao().updateDeliveryState(msg.requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
-                    }
+            nearbyManager.sendTrackedPayload(
+                endpointId = endpointId,
+                bytes = bytes,
+                onTransferSuccess = {
+                    Log.d(TAG, "Flushed message ${msg.messageId} bytes physically delivered to $endpointId; awaiting ACK")
                 },
-                onFailure = {
-                    Log.w(TAG, "Failed flushing message ${msg.messageId} to $endpointId")
+                onTransferFailure = { status ->
+                    Log.w(TAG, "Failed flushing message ${msg.messageId} to $endpointId (status $status)")
                 }
             )
+
+            val updatedForwarded = (forwardedSet + endpointId).joinToString(",")
+            database.relayMessageDao().updateStatusAndEndpoints(msg.messageId, "FORWARDED", updatedForwarded)
         }
     }
 
@@ -344,6 +529,40 @@ class StoreAndForwardRelayEngine(
         }
         for (peer in connected) {
             flushPendingOutboxToPeer(peer)
+        }
+    }
+
+    /**
+     * Explicit retry action callable from UI if an SOS transfer timed out or failed.
+     */
+    suspend fun retrySosTransmission(requestId: String): Boolean {
+        val sos = database.sosDao().getSosById(requestId) ?: return false
+        val messages = database.relayMessageDao().getMessagesForRequest(requestId)
+        val msg = messages.firstOrNull()
+
+        val connectedPeers = nearbyManager.connectedEndpoints.value
+        if (connectedPeers.isEmpty()) {
+            database.sosDao().updateDeliveryState(requestId, DeliveryState.RELAY_PENDING.name)
+            Log.i(TAG, "No peers connected for retry. Reverted $requestId to RELAY_PENDING.")
+            return false
+        }
+
+        if (msg != null) {
+            val bytes = msg.rawJsonEnvelope.toByteArray(Charsets.UTF_8)
+            database.sosDao().updateDeliveryState(requestId, DeliveryState.TRANSFER_IN_PROGRESS.name)
+            database.relayMessageDao().updateStatus(msg.messageId, "SENDING")
+
+            val session = OutgoingSosSession(msg.messageId, requestId, msg.rawJsonEnvelope, 1)
+            startAckTimeout(session)
+            activeOutgoingSessions[msg.messageId] = session
+
+            for (peer in connectedPeers) {
+                nearbyManager.sendTrackedPayload(peer, bytes)
+            }
+            return true
+        } else {
+            createAndBroadcastSos(sos)
+            return true
         }
     }
 }
