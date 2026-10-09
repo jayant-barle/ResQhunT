@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.resqhunt.citizen.ResQhunTApp
 import com.resqhunt.citizen.mesh.NearbyConnectionsManager
 import com.resqhunt.citizen.ui.MainActivity
 
@@ -41,11 +42,11 @@ class SosRelayForegroundService : Service() {
         }
     }
 
-    private lateinit var nearbyManager: NearbyConnectionsManager
+    private val nearbyManager: NearbyConnectionsManager
+        get() = (application as ResQhunTApp).nearbyManager
 
     override fun onCreate() {
         super.onCreate()
-        nearbyManager = NearbyConnectionsManager(applicationContext)
         createNotificationChannel()
     }
 
@@ -68,7 +69,7 @@ class SosRelayForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        // Start active BLE/Wi-Fi cluster advertising and discovery
+        // Start active BLE/Wi-Fi cluster advertising and discovery on the shared manager
         nearbyManager.startAdvertising()
         nearbyManager.startDiscovery()
 
@@ -77,7 +78,6 @@ class SosRelayForegroundService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        nearbyManager.stopAll()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

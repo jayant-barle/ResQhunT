@@ -1,6 +1,5 @@
 package com.resqhunt.citizen.ui.screens.settings
 
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,18 +18,30 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.resqhunt.citizen.data.remote.ResqHuntSyncClient
+import com.resqhunt.citizen.ResQhunTApp
 import com.resqhunt.citizen.mesh.BatteryAwareRouter
 import com.resqhunt.citizen.ui.theme.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 @Composable
 fun ProfileSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    val app = context.applicationContext as ResQhunTApp
+    val syncClient = app.syncClient
+    val coroutineScope = rememberCoroutineScope()
+
     val batteryRouter = remember { BatteryAwareRouter(context) }
     val batteryStatus = remember { batteryRouter.getBatteryStatus() }
 
-    var gatewayUrl by remember { mutableStateOf(ResqHuntSyncClient.baseUrl) }
+    var gatewayUrl by remember { mutableStateOf(syncClient.baseUrl) }
     var saveMessage by remember { mutableStateOf<String?>(null) }
+    var pingMessage by remember { mutableStateOf<String?>(null) }
+    var isPinging by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -59,7 +71,7 @@ fun ProfileSettingsScreen(onBack: () -> Unit) {
             Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Backend Gateway Host URL", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
                 Text(
-                    "Set to your local server IP (e.g. http://10.0.2.2:5000 in Android Emulator, or http://192.168.x.x:5000 on physical Wi-Fi).",
+                    "Set to your backend URL (e.g., http://10.0.2.2:5000 in Emulator, or http://<YOUR_PC_WIFI_IP>:5000 on real Android phones).",
                     fontSize = 11.sp,
                     color = MutedGray
                 )
@@ -72,23 +84,86 @@ fun ProfileSettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                Button(
-                    onClick = {
-                        ResqHuntSyncClient.baseUrl = gatewayUrl.trim()
-                        saveMessage = "Gateway URL updated to ${ResqHuntSyncClient.baseUrl}"
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Save Gateway URL", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            syncClient.baseUrl = gatewayUrl.trim()
+                            saveMessage = "Gateway URL saved: ${syncClient.baseUrl}"
+                            pingMessage = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Save URL", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                isPinging = true
+                                pingMessage = null
+                                val testUrl = "${gatewayUrl.trim().trimEnd('/')}/api/health"
+                                try {
+                                    val client = OkHttpClient.Builder()
+                                        .connectTimeout(5, TimeUnit.SECONDS)
+                                        .readTimeout(5, TimeUnit.SECONDS)
+                                        .build()
+                                    val req = Request.Builder().url(testUrl).get().build()
+                                    val res = withContext(Dispatchers.IO) { client.newCall(req).execute() }
+                                    if (res.isSuccessful) {
+                                        pingMessage = "SUCCESS: Backend is reachable (${res.code} OK)"
+                                    } else {
+                                        pingMessage = "FAILED: Server returned HTTP ${res.code}"
+                                    }
+                                } catch (e: Exception) {
+                                    pingMessage = "FAILED: ${e.message ?: e.javaClass.simpleName}"
+                                } finally {
+                                    isPinging = false
+                                }
+                            }
+                        },
+                        enabled = !isPinging,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (isPinging) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Test Ping", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
                 }
 
                 saveMessage?.let {
                     Text(it, fontSize = 11.sp, color = TealDark, fontWeight = FontWeight.Bold)
                 }
+
+                pingMessage?.let {
+                    Text(
+                        it,
+                        fontSize = 11.sp,
+                        color = if (it.startsWith("SUCCESS")) TealDark else EmergencyRed,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // Local Device Mesh Identity
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = CardSurface)
+        ) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Mesh Identity", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
+                Text("Device ID: ${app.nearbyManager.localDeviceId}", fontSize = 11.sp, color = InkText, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                Text("Beacon Name: ${app.nearbyManager.localDeviceName}", fontSize = 11.sp, color = InkText, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                Text("Nearby Strategy: P2P_CLUSTER (BLE & Wi-Fi Direct)", fontSize = 11.sp, color = MutedGray)
             }
         }
 

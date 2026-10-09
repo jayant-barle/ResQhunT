@@ -25,9 +25,13 @@ interface SosDao {
     @Query("SELECT * FROM sos_requests ORDER BY createdAt DESC LIMIT 1")
     fun getLatestSosFlow(): Flow<SosEntity?>
 
-    @Query("SELECT * FROM sos_requests WHERE deliveryState IN ('CREATED', 'STORED_LOCALLY', 'RELAY_PENDING')")
+    @Query("SELECT * FROM sos_requests WHERE deliveryState NOT IN ('SERVER_RECEIVED', 'COORDINATOR_ACKNOWLEDGED', 'ASSIGNED', 'IN_PROGRESS', 'RESOLVED') ORDER BY createdAt ASC")
     suspend fun getPendingUploadRequests(): List<SosEntity>
 
     @Query("UPDATE sos_requests SET deliveryState = :newState, updatedAt = :timestamp WHERE requestId = :requestId")
     suspend fun updateDeliveryState(requestId: String, newState: String, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE sos_requests SET deliveryState = :newState, priorityScore = :priorityScore, priorityCategory = :priorityCategory, updatedAt = :timestamp WHERE requestId = :requestId")
+    suspend fun updateServerState(requestId: String, newState: String, priorityScore: Float, priorityCategory: String, timestamp: Long = System.currentTimeMillis())
 }
+

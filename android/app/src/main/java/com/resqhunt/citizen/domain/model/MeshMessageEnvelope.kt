@@ -35,8 +35,10 @@ data class MeshMessageEnvelope(
     val expiresAt: Long = System.currentTimeMillis() + 86400000L, // 24 hours TTL
     val hopCount: Int = 1,
     val maxHops: Int = 5,
-    val payload: MeshPayload,
-    val integrity: MeshIntegrity
+    val payload: MeshPayload? = null,
+    val ackForMessageId: String? = null,
+    val ackSenderDeviceId: String? = null,
+    val integrity: MeshIntegrity = MeshIntegrity(checksum = "")
 ) {
     fun toJson(): String {
         return Gson().toJson(this)
@@ -64,5 +66,29 @@ data class MeshMessageEnvelope(
             val bytes = digest.digest(content.toByteArray(Charsets.UTF_8))
             return bytes.joinToString("") { "%02x".format(it) }
         }
+
+        fun createAck(
+            ackForMessageId: String,
+            requestId: String,
+            receiverDeviceId: String
+        ): MeshMessageEnvelope {
+            val ackId = "ack_" + java.util.UUID.randomUUID().toString()
+            return MeshMessageEnvelope(
+                messageId = ackId,
+                requestId = requestId,
+                originDeviceId = receiverDeviceId,
+                messageType = "SOS_ACK",
+                protocolVersion = 1,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + 3600000L,
+                hopCount = 1,
+                maxHops = 1,
+                payload = null,
+                ackForMessageId = ackForMessageId,
+                ackSenderDeviceId = receiverDeviceId,
+                integrity = MeshIntegrity(checksum = calculateChecksum("$ackForMessageId:$requestId:$receiverDeviceId"))
+            )
+        }
     }
 }
+

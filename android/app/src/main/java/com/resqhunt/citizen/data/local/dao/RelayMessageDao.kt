@@ -19,6 +19,18 @@ interface RelayMessageDao {
     @Query("SELECT * FROM relay_messages WHERE status = 'PENDING_FORWARD' AND expiresAt > :now ORDER BY createdAt ASC")
     suspend fun getPendingForwardMessages(now: Long = System.currentTimeMillis()): List<RelayMessageEntity>
 
+    @Query("SELECT * FROM relay_messages WHERE status IN ('PENDING_FORWARD', 'SENDING') AND expiresAt > :now ORDER BY createdAt ASC")
+    suspend fun getEligibleForwardMessages(now: Long = System.currentTimeMillis()): List<RelayMessageEntity>
+
+    @Query("SELECT * FROM relay_messages WHERE status != 'SYNCED_SERVER' AND expiresAt > :now ORDER BY createdAt ASC")
+    suspend fun getUnsyncedMessages(now: Long = System.currentTimeMillis()): List<RelayMessageEntity>
+
+    @Query("SELECT * FROM relay_messages WHERE messageId = :messageId LIMIT 1")
+    suspend fun getMessageById(messageId: String): RelayMessageEntity?
+
+    @Query("SELECT * FROM relay_messages WHERE requestId = :requestId")
+    suspend fun getMessagesForRequest(requestId: String): List<RelayMessageEntity>
+
     @Query("SELECT * FROM relay_messages ORDER BY createdAt DESC")
     fun getAllMessagesFlow(): Flow<List<RelayMessageEntity>>
 
@@ -28,3 +40,4 @@ interface RelayMessageDao {
     @Query("DELETE FROM relay_messages WHERE expiresAt <= :now")
     suspend fun pruneExpiredMessages(now: Long = System.currentTimeMillis()): Int
 }
+

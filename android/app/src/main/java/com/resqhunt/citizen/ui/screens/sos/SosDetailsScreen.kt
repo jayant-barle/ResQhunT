@@ -18,12 +18,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.resqhunt.citizen.ResQhunTApp
 import com.resqhunt.citizen.data.local.AppDatabase
 import com.resqhunt.citizen.data.local.entity.SosEntity
-import com.resqhunt.citizen.data.remote.ResqHuntSyncClient
 import com.resqhunt.citizen.domain.model.DeliveryState
 import com.resqhunt.citizen.ui.theme.*
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
 fun SosDetailsScreen(
@@ -32,16 +34,30 @@ fun SosDetailsScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val app = context.applicationContext as ResQhunTApp
+    val syncClient = app.syncClient
+    val nearbyManager = app.nearbyManager
     val coroutineScope = rememberCoroutineScope()
-    val syncClient = remember { ResqHuntSyncClient(context, database) }
 
     var sos by remember { mutableStateOf<SosEntity?>(null) }
-    var isSyncing by remember { mutableStateOf(false) }
-    var syncMessage by remember { mutableStateOf<String?>(null) }
+    val isSyncing by syncClient.isSyncing.collectAsState()
+    val lastSyncError by syncClient.lastSyncError.collectAsState()
+    val lastSyncSuccessTime by syncClient.lastSyncSuccessTime.collectAsState()
+    val connectedEndpoints by nearbyManager.connectedEndpoints.collectAsState()
+    val nearbyError by nearbyManager.lastError.collectAsState()
 
-    val refreshData = {
+    var syncFeedbackMessage by remember { mutableStateOf<String?>(null) }
+
+    val refreshData: () -> Unit = {
         coroutineScope.launch {
             sos = database.sosDao().getSosById(requestId)
+            // If online, query backend for any updated status from coordinators
+            if (syncClient.isOnline()) {
+                val updatedState = syncClient.checkIncidentStatus(requestId)
+                if (updatedState != null) {
+                    sos = database.sosDao().getSosById(requestId)
+                }
+            }
         }
     }
 
@@ -73,13 +89,14 @@ fun SosDetailsScreen(
         }
 
         if (sos == null) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = NavyPrimary)
             }
             return
         }
 
         val currentSos = sos!!
+        val currentState = currentSos.deliveryState
 
         // Status Card
         Card(
@@ -100,7 +117,7 @@ fun SosDetailsScreen(
                         fontWeight = FontWeight.Black
                     )
                     Text(
-                        text = "Score ${currentSos.priorityScore.toInt()}/100",
+                        text = "Priority Score: ${currentSos.priorityScore.toInt()}/100",
                         color = TealAccent,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
@@ -114,16 +131,46 @@ fun SosDetailsScreen(
                     fontWeight = FontWeight.Bold
                 )
 
-                Text(
-                    text = "Request ID: ${currentSos.requestId}",
-                    color = Color.White.copy(alpha = 0.6f),
-                    fontSize = 11.sp,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ID: ${currentSos.requestId.take(16)}...",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = when (currentState) {
+                            "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED" -> TealAccent.copy(alpha = 0.2f)
+                            "RELAYED_TO_PEER", "RECEIVED_BY_PEER" -> TealAccent.copy(alpha = 0.2f)
+                            "TRANSFER_IN_PROGRESS" -> Color.Yellow.copy(alpha = 0.2f)
+                            "RELAY_FAILED" -> EmergencyRed.copy(alpha = 0.2f)
+                            else -> CanvasBg.copy(alpha = 0.15f)
+                        }
+                    ) {
+                        Text(
+                            text = currentState.replace("_", " "),
+                            color = when (currentState) {
+                                "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED" -> TealAccent
+                                "RELAYED_TO_PEER", "RECEIVED_BY_PEER" -> TealAccent
+                                "TRANSFER_IN_PROGRESS" -> Color.Yellow
+                                "RELAY_FAILED" -> EmergencyLight
+                                else -> Color.White
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
             }
         }
 
-        // Stepper: Delivery Lifecycle
+        // Stepper: Honest Delivery State Machine
         Text(
             text = "Delivery State Machine",
             fontSize = 14.sp,
@@ -136,61 +183,109 @@ fun SosDetailsScreen(
             colors = CardDefaults.cardColors(containerColor = CardSurface),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                val currentState = currentSos.deliveryState
-
+            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                // 1. Saved locally
                 StepItem(
-                    title = "1. CREATED",
-                    subtitle = "Emergency request initialized on device",
-                    isCompleted = true,
-                    isCurrent = false
-                )
-                StepItem(
-                    title = "2. STORED LOCALLY",
+                    title = "1. SAVED LOCALLY",
                     subtitle = "Persisted to Room SQLite database (zero-data-loss guarantee)",
                     isCompleted = true,
-                    isCurrent = currentState == "STORED_LOCALLY"
+                    isCurrent = currentState in listOf("CREATED", "STORED_LOCALLY")
                 )
+
+                // 2. Searching
                 StepItem(
-                    title = "3. RELAY PENDING",
-                    subtitle = "Searching nearby cluster for BLE & Wi-Fi Direct peers",
-                    isCompleted = currentState !in listOf("CREATED", "STORED_LOCALLY"),
+                    title = "2. SEARCHING FOR PEERS",
+                    subtitle = "Nearby cluster BLE beacon & Wi-Fi Direct scanning active",
+                    isCompleted = currentState !in listOf("CREATED", "STORED_LOCALLY", "RELAY_PENDING"),
                     isCurrent = currentState == "RELAY_PENDING"
                 )
+
+                // 3. Transfer in progress
                 StepItem(
-                    title = "4. RELAYED TO PEER",
-                    subtitle = "Transferred to adjacent physical Android node in mesh",
-                    isCompleted = currentState in listOf(
-                        "RELAYED_TO_PEER", "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"
-                    ),
-                    isCurrent = currentState == "RELAYED_TO_PEER"
+                    title = "3. TRANSFER IN PROGRESS",
+                    subtitle = "Payload currently transmitting to connected adjacent peer",
+                    isCompleted = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER", "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
+                    isCurrent = currentState == "TRANSFER_IN_PROGRESS"
                 )
+
+                // 4. Relayed to peer / Received by peer (ACK Confirmed)
+                StepItem(
+                    title = "4. CONFIRMED BY PEER (ACK)",
+                    subtitle = if (currentState == "RECEIVED_BY_PEER") "Received from mesh peer and persisted to local Room DB" else "Application-level ACK received from adjacent physical Android phone",
+                    isCompleted = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER", "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
+                    isCurrent = currentState in listOf("RELAYED_TO_PEER", "RECEIVED_BY_PEER")
+                )
+
+                // 5. Server Received
                 StepItem(
                     title = "5. SERVER RECEIVED",
-                    subtitle = "Uploaded to central ResQhunT cloud backend by gateway node",
-                    isCompleted = currentState in listOf(
-                        "SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"
-                    ),
+                    subtitle = "Uploaded to central cloud backend by gateway node (Confirmed by API)",
+                    isCompleted = currentState in listOf("SERVER_RECEIVED", "COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
                     isCurrent = currentState == "SERVER_RECEIVED"
                 )
+
+                // 6. Coordinator Acknowledged
                 StepItem(
                     title = "6. COORDINATOR ACKNOWLEDGED",
-                    subtitle = "Rescue command triaged and acknowledged incident",
+                    subtitle = "Rescue coordinator triaged and acknowledged incident in dashboard",
                     isCompleted = currentState in listOf("COORDINATOR_ACKNOWLEDGED", "ASSIGNED", "IN_PROGRESS", "RESOLVED"),
                     isCurrent = currentState == "COORDINATOR_ACKNOWLEDGED"
                 )
+
+                // 7. Assigned / In Progress
                 StepItem(
                     title = "7. ASSIGNED & IN PROGRESS",
-                    subtitle = "Field volunteer assigned with required equipment",
+                    subtitle = "Disaster volunteer team deployed with equipment",
                     isCompleted = currentState in listOf("ASSIGNED", "IN_PROGRESS", "RESOLVED"),
                     isCurrent = currentState in listOf("ASSIGNED", "IN_PROGRESS")
                 )
+
+                // 8. Resolved
                 StepItem(
                     title = "8. RESOLVED",
-                    subtitle = "All rescue operations completed successfully",
+                    subtitle = "Emergency situation resolved by emergency services",
                     isCompleted = currentState == "RESOLVED",
                     isCurrent = currentState == "RESOLVED"
                 )
+            }
+        }
+
+        // Diagnostics Card
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = CardSurface),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Sync & Mesh Diagnostics", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
+
+                DiagnosticRow(label = "Connected Peers:", value = "${connectedEndpoints.size} active node(s)")
+                DiagnosticRow(label = "Internet State:", value = if (syncClient.isOnline()) "ONLINE" else "OFFLINE (Mesh Relay Active)")
+                DiagnosticRow(label = "Gateway Target:", value = syncClient.baseUrl)
+
+                val lastSyncTime = lastSyncSuccessTime
+                if (lastSyncTime != null) {
+                    val sdf = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+                    DiagnosticRow(label = "Last Successful Sync:", value = sdf.format(Date(lastSyncTime)))
+                }
+
+                if (!nearbyError.isNullOrBlank()) {
+                    Text(
+                        text = "Nearby Note: $nearbyError",
+                        fontSize = 11.sp,
+                        color = EmergencyRed,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (!lastSyncError.isNullOrBlank()) {
+                    Text(
+                        text = "Gateway Status: $lastSyncError",
+                        fontSize = 11.sp,
+                        color = EmergencyRed,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
 
@@ -198,20 +293,10 @@ fun SosDetailsScreen(
         Button(
             onClick = {
                 coroutineScope.launch {
-                    isSyncing = true
-                    syncMessage = null
-                    val count = syncClient.syncPendingWithServer()
-                    isSyncing = false
-                    if (count > 0) {
-                        syncMessage = "Successfully synced $count request(s) to cloud!"
-                        refreshData()
-                    } else {
-                        syncMessage = if (!syncClient.isOnline()) {
-                            "Device is offline. Mesh store-and-forward relay remains active."
-                        } else {
-                            "No pending requests or server unreachable."
-                        }
-                    }
+                    syncFeedbackMessage = null
+                    val result = syncClient.syncPendingWithServer()
+                    syncFeedbackMessage = result.message
+                    refreshData()
                 }
             },
             enabled = !isSyncing,
@@ -221,20 +306,37 @@ fun SosDetailsScreen(
                 .fillMaxWidth()
                 .height(52.dp)
         ) {
-            Icon(Icons.Default.CloudUpload, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (isSyncing) "Syncing with Cloud..." else "Attempt Direct Gateway Sync", fontWeight = FontWeight.Bold)
+            if (isSyncing) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Syncing with Cloud Gateway...", fontWeight = FontWeight.Bold)
+            } else {
+                Icon(Icons.Default.CloudUpload, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Attempt Direct Gateway Sync", fontWeight = FontWeight.Bold)
+            }
         }
 
-        syncMessage?.let { msg ->
+        syncFeedbackMessage?.let { msg ->
             Text(
                 text = msg,
                 fontSize = 12.sp,
-                color = if (msg.contains("Success")) TealDark else EmergencyRed,
+                color = if (msg.contains("Success", ignoreCase = true)) TealDark else EmergencyRed,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 4.dp)
             )
         }
+    }
+}
+
+@Composable
+fun DiagnosticRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, fontSize = 11.sp, color = MutedGray)
+        Text(text = value, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = InkText)
     }
 }
 

@@ -1,5 +1,10 @@
 package com.resqhunt.citizen.ui.screens.mesh
 
+import android.bluetooth.BluetoothAdapter
+import android.content.Context
+import android.content.Intent
+import android.location.LocationManager
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -10,17 +15,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.resqhunt.citizen.data.local.AppDatabase
 import com.resqhunt.citizen.mesh.NearbyConnectionsManager
+import com.resqhunt.citizen.ui.MainActivity
 import com.resqhunt.citizen.ui.theme.*
 
 @Composable
@@ -29,17 +37,33 @@ fun NearbyDeviceStatusScreen(
     nearbyManager: NearbyConnectionsManager,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val peers by database.peerDao().getAllPeersFlow().collectAsState(initial = emptyList())
     val connectedEndpoints by nearbyManager.connectedEndpoints.collectAsState()
+    val discoveredEndpoints by nearbyManager.discoveredEndpoints.collectAsState()
     val isAdvertising by nearbyManager.isAdvertising.collectAsState()
     val isDiscovering by nearbyManager.isDiscovering.collectAsState()
+    val lastError by nearbyManager.lastError.collectAsState()
+
+    // Hardware status checks
+    val isBtEnabled = remember(isAdvertising, isDiscovering) {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        adapter != null && adapter.isEnabled
+    }
+
+    val isLocEnabled = remember(isAdvertising, isDiscovering) {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        lm != null && (lm.isProviderEnabled(LocationManager.GPS_PROVIDER) || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
+    }
+
+    val isPlayServicesOk = remember { nearbyManager.isGooglePlayServicesAvailable() }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(CanvasBg)
             .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -51,14 +75,83 @@ fun NearbyDeviceStatusScreen(
             }
             Text("Nearby Mesh Radar", fontSize = 16.sp, fontWeight = FontWeight.Black, color = NavyPrimary)
             IconButton(onClick = {
-                nearbyManager.startDiscovery()
+                nearbyManager.stopAll()
                 nearbyManager.startAdvertising()
+                nearbyManager.startDiscovery()
             }) {
                 Icon(Icons.Default.Refresh, contentDescription = "Restart Scan", tint = NavyPrimary)
             }
         }
 
-        // Status Card
+        // Hardware / Permission Diagnostic Warnings
+        if (!isPlayServicesOk) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = EmergencyRed.copy(alpha = 0.1f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = EmergencyRed)
+                    Text("Google Play Services is not available. Nearby Connections requires Play Services.", color = EmergencyRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        if (!isBtEnabled) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = EmergencyRed.copy(alpha = 0.1f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = EmergencyRed)
+                        Text("Bluetooth is disabled. Please turn ON Bluetooth for device discovery.", color = EmergencyRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        if (!isLocEnabled) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3CD)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFF856404))
+                        Text("Location is disabled. Nearby Wi-Fi & BLE discovery requires Location Services.", color = Color(0xFF856404), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF856404)),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("Enable", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // Radar Mesh Status Card
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = NavyPrimary),
@@ -66,20 +159,53 @@ fun NearbyDeviceStatusScreen(
         ) {
             Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Google Nearby Connections (Cluster Mode)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Text("Local Node: ${nearbyManager.localDeviceName}", color = TealAccent, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Advertising Beacon:", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
-                    Text(if (isAdvertising) "ACTIVE (BLE)" else "IDLE", color = if (isAdvertising) TealAccent else Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text(if (isAdvertising) "ACTIVE (BLE/P2P)" else "IDLE", color = if (isAdvertising) TealAccent else Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Peer Discovery:", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
-                    Text(if (isDiscovering) "SCANNING (P2P)" else "IDLE", color = if (isDiscovering) TealAccent else Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text(if (isDiscovering) "SCANNING (Cluster)" else "IDLE", color = if (isDiscovering) TealAccent else Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Connected Mesh Nodes:", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                    Text("${connectedEndpoints.size} node(s)", color = if (connectedEndpoints.isNotEmpty()) TealAccent else Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+
+                if (!lastError.isNullOrBlank()) {
+                    Text(
+                        text = "Diagnostics: $lastError",
+                        color = EmergencyLight,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // Action Buttons Row: Restart Advertising / Discovery
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = {
+                    (context as? MainActivity)?.requestRequiredPermissions()
+                    nearbyManager.startAdvertising()
+                },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Start Beacon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = {
+                    (context as? MainActivity)?.requestRequiredPermissions()
+                    nearbyManager.startDiscovery()
+                },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Start Discovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -90,6 +216,7 @@ fun NearbyDeviceStatusScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     CircularProgressIndicator(color = NavyPrimary, modifier = Modifier.size(36.dp))
                     Text("Searching for compatible Android devices nearby...", fontSize = 12.sp, color = MutedGray)
+                    Text("Keep both devices in range with Bluetooth & Location enabled.", fontSize = 11.sp, color = MutedGray)
                 }
             }
         } else {

@@ -126,30 +126,32 @@ fun CitizenHomeScreen(
                         .clickable { onNavigateToDetails(sos.requestId) }
                 ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val isPeerRelay = sos.deliveryState == "RECEIVED_BY_PEER"
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "ACTIVE EMERGENCY",
-                                color = EmergencyRed,
+                                text = if (isPeerRelay) "INCOMING PEER SOS RELAY" else "MY ACTIVE EMERGENCY",
+                                color = if (isPeerRelay) TealDark else EmergencyRed,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Black
                             )
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = NavyPrimary.copy(alpha = 0.08f)
+                                color = if (isPeerRelay) TealAccent.copy(alpha = 0.15f) else NavyPrimary.copy(alpha = 0.08f)
                             ) {
                                 Text(
                                     text = sos.deliveryState.replace("_", " "),
-                                    color = NavyPrimary,
+                                    color = if (isPeerRelay) TealDark else NavyPrimary,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
                         }
+
 
                         Text(
                             text = sos.description,

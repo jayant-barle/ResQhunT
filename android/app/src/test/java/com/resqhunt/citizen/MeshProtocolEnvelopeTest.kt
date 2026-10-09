@@ -43,8 +43,8 @@ class MeshProtocolEnvelopeTest {
         val deserialized = MeshMessageEnvelope.fromJson(json)
         assertEquals("msg_test_001", deserialized.messageId)
         assertEquals("sos_test_123", deserialized.requestId)
-        assertEquals("MEDICAL", deserialized.payload.category)
-        assertEquals(3, deserialized.payload.affectedCount)
+        assertEquals("MEDICAL", deserialized.payload?.category)
+        assertEquals(3, deserialized.payload?.affectedCount)
         assertEquals(checksum, deserialized.integrity.checksum)
     }
 
@@ -102,5 +102,33 @@ class MeshProtocolEnvelopeTest {
 
         val hop5 = env.copy(hopCount = 5)
         assertTrue(hop5.hasExceededHops())
+    }
+
+    @Test
+    fun testAckEnvelopeCreationAndValidation() {
+        val originalMsgId = "msg_emergency_999"
+        val requestId = "sos_emergency_999"
+        val receiverId = "dev_receiver_node"
+
+        val ack = MeshMessageEnvelope.createAck(
+            ackForMessageId = originalMsgId,
+            requestId = requestId,
+            receiverDeviceId = receiverId
+        )
+
+        assertEquals("SOS_ACK", ack.messageType)
+        assertEquals(originalMsgId, ack.ackForMessageId)
+        assertEquals(requestId, ack.requestId)
+        assertEquals(receiverId, ack.ackSenderDeviceId)
+        assertEquals(1, ack.protocolVersion)
+        assertNull(ack.payload)
+
+        // Verify JSON roundtrip
+        val json = ack.toJson()
+        val parsedAck = MeshMessageEnvelope.fromJson(json)
+        assertEquals("SOS_ACK", parsedAck.messageType)
+        assertEquals(originalMsgId, parsedAck.ackForMessageId)
+        assertEquals(requestId, parsedAck.requestId)
+        assertEquals(receiverId, parsedAck.ackSenderDeviceId)
     }
 }
