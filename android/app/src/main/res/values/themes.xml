@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.ResQhunT" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/navy_primary</item>
+        <item name="android:navigationBarColor">@color/canvas_bg</item>
+    </style>
+</resources>

@@ -1,0 +1,8 @@
+<resources>
+    <color name="navy_primary">#10233F</color>
+    <color name="emergency_red">#DC2626</color>
+    <color name="teal_accent">#18B6A4</color>
+    <color name="canvas_bg">#F4F7FB</color>
+    <color name="ink_text">#172033</color>
+    <color name="white">#FFFFFF</color>
+</resources>

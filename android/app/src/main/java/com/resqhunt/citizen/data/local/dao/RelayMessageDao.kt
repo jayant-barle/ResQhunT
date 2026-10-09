@@ -1,0 +1,30 @@
+package com.resqhunt.citizen.data.local.dao
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Update
+import com.resqhunt.citizen.data.local.entity.RelayMessageEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface RelayMessageDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertMessage(message: RelayMessageEntity): Long
+
+    @Query("SELECT COUNT(*) FROM relay_messages WHERE messageId = :messageId")
+    suspend fun hasMessage(messageId: String): Int
+
+    @Query("SELECT * FROM relay_messages WHERE status = 'PENDING_FORWARD' AND expiresAt > :now ORDER BY createdAt ASC")
+    suspend fun getPendingForwardMessages(now: Long = System.currentTimeMillis()): List<RelayMessageEntity>
+
+    @Query("SELECT * FROM relay_messages ORDER BY createdAt DESC")
+    fun getAllMessagesFlow(): Flow<List<RelayMessageEntity>>
+
+    @Query("UPDATE relay_messages SET status = :status WHERE messageId = :messageId")
+    suspend fun updateStatus(messageId: String, status: String)
+
+    @Query("DELETE FROM relay_messages WHERE expiresAt <= :now")
+    suspend fun pruneExpiredMessages(now: Long = System.currentTimeMillis()): Int
+}

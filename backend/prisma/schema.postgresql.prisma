@@ -1,0 +1,126 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  passwordHash String
+  fullName     String
+  phone        String?
+  role         String        @default("CITIZEN")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  volunteer    Volunteer?
+  assignments  Assignment[]  @relation("AssignedByUser")
+  allocations  ResourceAllocation[] @relation("AllocatedByUser")
+  logs         ActivityLog[] @relation("PerformedByUser")
+}
+
+model EmergencyRequest {
+  id               String               @id @default(uuid())
+  requestId        String               @unique
+  originDeviceId   String
+  category         String
+  severity         String
+  affectedCount    Int                  @default(1)
+  description      String
+  latitude         Float?
+  longitude        Float?
+  locationAccuracy Float?
+  locationAddress  String?
+  deliveryState    String               @default("SERVER_RECEIVED")
+  priorityScore    Float                @default(50.0)
+  priorityCategory String               @default("MEDIUM")
+  overrideScore    Float?
+  overrideReason   String?
+  syncHopCount     Int                  @default(1)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  syncRecords      MessageSyncRecord[]
+  assignments      Assignment[]
+  allocations      ResourceAllocation[]
+}
+
+model MessageSyncRecord {
+  id             String           @id @default(uuid())
+  messageId      String           @unique
+  requestId      String
+  request        EmergencyRequest @relation(fields: [requestId], references: [requestId], onDelete: Cascade)
+  originDeviceId String
+  hopCount       Int              @default(1)
+  syncedByUserId String?
+  syncedAt       DateTime         @default(now())
+}
+
+model Volunteer {
+  id                     String       @id @default(uuid())
+  userId                 String       @unique
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skills                 String
+  isAvailable            Boolean      @default(true)
+  latitude               Float?
+  longitude              Float?
+  phone                  String?
+  activeAssignmentsCount Int          @default(0)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  assignments            Assignment[]
+}
+
+model Assignment {
+  id               String           @id @default(uuid())
+  incidentId       String
+  incident         EmergencyRequest @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  volunteerId      String
+  volunteer        Volunteer        @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+  status           String           @default("PENDING")
+  assignedByUserId String
+  assignedByUser   User             @relation("AssignedByUser", fields: [assignedByUserId], references: [id])
+  notes            String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
+
+model ReliefResource {
+  id                String               @id @default(uuid())
+  name              String
+  category          String
+  totalQuantity     Int
+  availableQuantity Int
+  unit              String
+  location          String
+  isVerified        Boolean              @default(true)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  allocations       ResourceAllocation[]
+}
+
+model ResourceAllocation {
+  id                String           @id @default(uuid())
+  resourceId        String
+  resource          ReliefResource   @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  incidentId        String
+  incident          EmergencyRequest @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  quantity          Int
+  allocatedByUserId String
+  allocatedByUser   User             @relation("AllocatedByUser", fields: [allocatedByUserId], references: [id])
+  notes             String?
+  timestamp         DateTime         @default(now())
+}
+
+model ActivityLog {
+  id                String   @id @default(uuid())
+  actionType        String
+  entityType        String
+  entityId          String
+  details           String
+  performedByUserId String?
+  performedByUser   User?    @relation("PerformedByUser", fields: [performedByUserId], references: [id])
+  timestamp         DateTime @default(now())
+}
