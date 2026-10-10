@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.resqhunt.citizen.ui.theme.*
+import java.util.Locale
 
 @Composable
 fun IncomingSosAlertDialog(
@@ -103,31 +104,36 @@ fun IncomingSosAlertDialog(
                 )
 
                 // Location Details: Display coordinates, accuracy, source, and landmark
-                val hasCoordinates = alert.latitude != null && alert.longitude != null
+                val hasCoordinates = alert.latitude != null && alert.longitude != null && alert.latitude != 0.0
                 val hasAddress = !alert.locationAddress.isNullOrBlank()
-                if (hasCoordinates || hasAddress) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = NavyPrimary.copy(alpha = 0.04f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            if (hasCoordinates) {
-                                val accStr = if (alert.locationAccuracy != null) " (±${alert.locationAccuracy.toInt()}m)" else ""
-                                Text(
-                                    "Location: ${"%.6f".format(alert.latitude)}, ${"%.6f".format(alert.longitude)}$accStr",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = NavyPrimary
-                                )
-                            }
-                            if (hasAddress) {
-                                Text(
-                                    alert.locationAddress.orEmpty(),
-                                    fontSize = 11.sp,
-                                    color = InkText
-                                )
-                            }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = NavyPrimary.copy(alpha = 0.04f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (hasCoordinates) {
+                            val accStr = if (alert.locationAccuracy != null) " (±${String.format(Locale.US, "%.1f", alert.locationAccuracy)}m)" else ""
+                            Text(
+                                "Location: ${String.format(Locale.US, "%.6f, %.6f", alert.latitude, alert.longitude)}$accStr",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = NavyPrimary
+                            )
+                        } else {
+                            Text(
+                                "Location: Location unavailable",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MutedGray
+                            )
+                        }
+                        if (hasAddress && alert.locationAddress != "Location unavailable") {
+                            Text(
+                                alert.locationAddress.orEmpty(),
+                                fontSize = 11.sp,
+                                color = InkText
+                            )
                         }
                     }
                 }

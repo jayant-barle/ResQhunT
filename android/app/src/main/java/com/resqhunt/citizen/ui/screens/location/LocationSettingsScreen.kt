@@ -1,5 +1,10 @@
 package com.resqhunt.citizen.ui.screens.location
 
+import android.Manifest
+import android.content.Intent
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -21,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.resqhunt.citizen.ResQhunTApp
+import com.resqhunt.citizen.location.LocationPermissionState
 import com.resqhunt.citizen.ui.theme.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -35,14 +41,29 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
 
     val currentFix by locationManager.currentFix.collectAsState()
     var isAcquiring by remember { mutableStateOf(false) }
-    var hasPermission by remember { mutableStateOf(locationManager.hasLocationPermission()) }
-    var isGpsEnabled by remember { mutableStateOf(locationManager.isLocationEnabled()) }
+    var permissionState by remember { mutableStateOf(locationManager.getPermissionState()) }
+    var isLocationEnabled by remember { mutableStateOf(locationManager.isLocationEnabled()) }
+    var isGpsProviderEnabled by remember { mutableStateOf(locationManager.isGpsProviderEnabled()) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        permissionState = locationManager.getPermissionState()
+        isLocationEnabled = locationManager.isLocationEnabled()
+        isGpsProviderEnabled = locationManager.isGpsProviderEnabled()
+        coroutineScope.launch {
+            isAcquiring = true
+            locationManager.acquireCurrentOrLastKnownLocation(3000L)
+            isAcquiring = false
+        }
+    }
 
     val refreshLocation: () -> Unit = {
         coroutineScope.launch {
             isAcquiring = true
-            hasPermission = locationManager.hasLocationPermission()
-            isGpsEnabled = locationManager.isLocationEnabled()
+            permissionState = locationManager.getPermissionState()
+            isLocationEnabled = locationManager.isLocationEnabled()
+            isGpsProviderEnabled = locationManager.isGpsProviderEnabled()
             locationManager.acquireCurrentOrLastKnownLocation(3000L)
             isAcquiring = false
         }
@@ -87,9 +108,10 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = CardSurface)
         ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Sensor & Hardware Subsystems", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
 
+                // Permission State Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -98,20 +120,37 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
                     Text("Location Permission:", fontSize = 12.sp, color = MutedGray)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Icon(
-                            imageVector = if (hasPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
+                            imageVector = when (permissionState) {
+                                LocationPermissionState.PRECISE -> Icons.Default.CheckCircle
+                                LocationPermissionState.APPROXIMATE -> Icons.Default.Warning
+                                LocationPermissionState.DENIED -> Icons.Default.Warning
+                            },
                             contentDescription = null,
-                            tint = if (hasPermission) TealDark else EmergencyRed,
+                            tint = when (permissionState) {
+                                LocationPermissionState.PRECISE -> TealDark
+                                LocationPermissionState.APPROXIMATE -> Color(0xFFE65100)
+                                LocationPermissionState.DENIED -> EmergencyRed
+                            },
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = if (hasPermission) "GRANTED" else "DENIED",
+                            text = when (permissionState) {
+                                LocationPermissionState.PRECISE -> "PRECISE (FINE)"
+                                LocationPermissionState.APPROXIMATE -> "APPROXIMATE ONLY"
+                                LocationPermissionState.DENIED -> "DENIED"
+                            },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (hasPermission) TealDark else EmergencyRed
+                            color = when (permissionState) {
+                                LocationPermissionState.PRECISE -> TealDark
+                                LocationPermissionState.APPROXIMATE -> Color(0xFFE65100)
+                                LocationPermissionState.DENIED -> EmergencyRed
+                            }
                         )
                     }
                 }
 
+                // Device Location Services Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -120,26 +159,76 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
                     Text("Device Location Services:", fontSize = 12.sp, color = MutedGray)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Icon(
-                            imageVector = if (isGpsEnabled) Icons.Default.CheckCircle else Icons.Default.Warning,
+                            imageVector = if (isLocationEnabled) Icons.Default.CheckCircle else Icons.Default.Warning,
                             contentDescription = null,
-                            tint = if (isGpsEnabled) TealDark else EmergencyRed,
+                            tint = if (isLocationEnabled) TealDark else EmergencyRed,
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = if (isGpsEnabled) "ACTIVE" else "DISABLED",
+                            text = when {
+                                isGpsProviderEnabled -> "ACTIVE (GPS ON)"
+                                isLocationEnabled -> "ACTIVE (NETWORK ONLY)"
+                                else -> "DISABLED"
+                            },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (isGpsEnabled) TealDark else EmergencyRed
+                            color = if (isLocationEnabled) TealDark else EmergencyRed
                         )
                     }
                 }
 
+                // Provider Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("Provider Client:", fontSize = 12.sp, color = MutedGray)
                     Text("Google FusedLocationProvider", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = InkText)
+                }
+
+                // Upgrade / Fix Button if approximate or disabled
+                if (permissionState == LocationPermissionState.APPROXIMATE) {
+                    OutlinedButton(
+                        onClick = {
+                            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION))
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().height(38.dp)
+                    ) {
+                        Text("Upgrade to Precise Location", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else if (permissionState == LocationPermissionState.DENIED) {
+                    OutlinedButton(
+                        onClick = {
+                            permissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().height(38.dp)
+                    ) {
+                        Text("Grant Location Permission", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (!isLocationEnabled) {
+                    Button(
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().height(38.dp)
+                    ) {
+                        Text("Turn On Location Services in Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -162,23 +251,20 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
                     }
 
                     if (fix != null) {
+                        val badgeColor = when {
+                            fix.isFresh -> TealDark
+                            fix.isApproximate -> Color(0xFFE65100)
+                            else -> Color(0xFFF57C00)
+                        }
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = when (fix.source) {
-                                "FRESH_GPS" -> TealAccent.copy(alpha = 0.2f)
-                                "LAST_KNOWN" -> Color(0xFFFF9800).copy(alpha = 0.2f)
-                                else -> CanvasBg.copy(alpha = 0.4f)
-                            }
+                            color = badgeColor.copy(alpha = 0.15f)
                         ) {
                             Text(
                                 text = fix.source,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Black,
-                                color = when (fix.source) {
-                                    "FRESH_GPS" -> TealDark
-                                    "LAST_KNOWN" -> Color(0xFFE65100)
-                                    else -> MutedGray
-                                },
+                                color = badgeColor,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
@@ -214,10 +300,25 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
                         )
                     }
                     val sdf = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
+                    val ageMs = fix.ageMs
+                    val ageStr = when {
+                        ageMs < 60_000L -> "${ageMs / 1000}s ago"
+                        ageMs < 3600_000L -> "${ageMs / 60_000L}m ago"
+                        else -> "${ageMs / 3600_000L}h ago"
+                    }
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Lock Acquired:", fontSize = 12.sp, color = MutedGray)
                         Text(
-                            text = sdf.format(Date(fix.timestamp)),
+                            text = "${sdf.format(Date(fix.timestamp))} ($ageStr)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = InkText
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Provider:", fontSize = 12.sp, color = MutedGray)
+                        Text(
+                            text = fix.provider,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = InkText
@@ -262,4 +363,3 @@ fun LocationSettingsScreen(onBack: () -> Unit) {
         )
     }
 }
-

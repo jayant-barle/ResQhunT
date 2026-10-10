@@ -300,21 +300,29 @@ fun SosDetailsScreen(
                     }
 
                     if (hasValidLocation) {
+                        val isFresh = currentSos.locationSource == "FRESH_GPS"
+                        val isApproximate = currentSos.locationSource == "APPROXIMATE_COARSE"
                         val sourceLabel = when (currentSos.locationSource) {
-                            "FRESH_GPS" -> "FRESH GPS"
-                            "LAST_KNOWN" -> "LAST KNOWN"
+                            "FRESH_GPS" -> "FRESH GPS LOCK"
+                            "LAST_KNOWN" -> "LAST KNOWN (STALE)"
+                            "APPROXIMATE_COARSE" -> "APPROXIMATE"
                             "MANUAL" -> "MANUAL NOTE"
                             else -> "GPS FIX"
                         }
+                        val badgeColor = when {
+                            isFresh -> TealDark
+                            isApproximate -> Color(0xFFE65100)
+                            else -> Color(0xFFF57C00)
+                        }
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = TealAccent.copy(alpha = 0.15f)
+                            color = badgeColor.copy(alpha = 0.15f)
                         ) {
                             Text(
                                 text = sourceLabel,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Black,
-                                color = TealDark,
+                                color = badgeColor,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
@@ -332,12 +340,32 @@ fun SosDetailsScreen(
                         )
                     }
 
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Accuracy:", fontSize = 12.sp, color = MutedGray)
+                        Text(
+                            text = if (currentSos.locationAccuracy != null) {
+                                "± ${String.format(Locale.US, "%.1f", currentSos.locationAccuracy)}m"
+                            } else {
+                                "Unspecified"
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TealDark
+                        )
+                    }
+
                     val locTime = currentSos.locationTimestamp ?: currentSos.createdAt
                     val timeSdf = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
+                    val ageMs = Math.max(0L, System.currentTimeMillis() - locTime)
+                    val ageStr = when {
+                        ageMs < 60_000L -> "${ageMs / 1000}s ago"
+                        ageMs < 3600_000L -> "${ageMs / 60_000L}m ago"
+                        else -> "${ageMs / 3600_000L}h ago"
+                    }
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Fix Timestamp:", fontSize = 12.sp, color = MutedGray)
                         Text(
-                            text = timeSdf.format(Date(locTime)),
+                            text = "${timeSdf.format(Date(locTime))} ($ageStr)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = InkText

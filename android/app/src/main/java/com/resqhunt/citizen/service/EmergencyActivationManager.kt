@@ -246,20 +246,8 @@ class EmergencyActivationManager private constructor(private val appContext: Con
                     Log.d(TAG, "Attempting background GPS lock acquisition...")
                     val freshFix = locationManager.acquireCurrentOrLastKnownLocation(maxWaitMs = 5000L)
                     if (freshFix != null) {
-                        val existing = database.sosDao().getSosById(requestId)
-                        if (existing != null) {
-                            val updatedSos = existing.copy(
-                                latitude = freshFix.latitude,
-                                longitude = freshFix.longitude,
-                                locationAccuracy = freshFix.accuracy,
-                                locationTimestamp = freshFix.timestamp,
-                                locationSource = freshFix.source,
-                                locationAddress = "GPS Coordinates Locked (${freshFix.source})",
-                                updatedAt = System.currentTimeMillis()
-                            )
-                            database.sosDao().updateSos(updatedSos)
-                            Log.i(TAG, "Updated SOS $requestId with fresh location (${freshFix.latitude}, ${freshFix.longitude})")
-                        }
+                        relayEngine.updateSosLocationAndBroadcast(requestId, freshFix)
+                        Log.i(TAG, "Updated and broadcast fresh location for $requestId (${freshFix.latitude}, ${freshFix.longitude})")
                     }
                 }
             } catch (e: Exception) {

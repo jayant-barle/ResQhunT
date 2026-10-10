@@ -14,6 +14,8 @@ import com.resqhunt.citizen.domain.model.MeshMessageEnvelope
 import com.resqhunt.citizen.domain.model.MeshPayload
 import com.resqhunt.citizen.domain.model.SeverityLevel
 import com.resqhunt.citizen.domain.priority.DeterministicPriorityEngine
+import com.resqhunt.citizen.location.EmergencyLocationManager
+import com.resqhunt.citizen.location.LocationFix
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -194,6 +196,106 @@ class StoreAndForwardRelayEngine(
         }
 
         return envelope
+    }
+
+    /**
+     * Updates an existing SOS entity with a fresh location lock acquired asynchronously,
+     * and re-broadcasts the updated location to all connected mesh peers.
+     */
+    suspend fun updateSosLocationAndBroadcast(requestId: String, fix: LocationFix) {
+        val existingSos = database.sosDao().getSosById(requestId) ?: return
+        val updatedSos = existingSos.copy(
+            latitude = fix.latitude,
+            longitude = fix.longitude,
+            locationAccuracy = fix.accuracy,
+            locationTimestamp = fix.timestamp,
+            locationSource = fix.source,
+            locationAddress = if (existingSos.locationAddress.isNullOrBlank() ||
+                existingSos.locationAddress?.startsWith("Coordinates Pending") == true ||
+                existingSos.locationAddress == "Location unavailable"
+            ) {
+                "GPS Coordinates Locked (${fix.source})"
+            } else {
+                existingSos.locationAddress
+            },
+            updatedAt = System.currentTimeMillis()
+        )
+        database.sosDao().updateSos(updatedSos)
+
+        val messageId = "msg_loc_upd_" + UUID.randomUUID().toString()
+        val payload = MeshPayload(
+            category = updatedSos.category,
+            severity = updatedSos.severity,
+            affectedCount = updatedSos.affectedCount,
+            description = updatedSos.description,
+            latitude = updatedSos.latitude,
+            longitude = updatedSos.longitude,
+            locationAccuracy = updatedSos.locationAccuracy,
+            locationAddress = updatedSos.locationAddress,
+            locationTimestamp = updatedSos.locationTimestamp,
+            locationSource = updatedSos.locationSource
+        )
+
+        val rawContentForChecksum = "${updatedSos.requestId}:${updatedSos.category}:${updatedSos.severity}:${updatedSos.affectedCount}:${updatedSos.description}"
+        val checksum = MeshMessageEnvelope.calculateChecksum(rawContentForChecksum)
+
+        val envelope = MeshMessageEnvelope(
+            messageId = messageId,
+            requestId = updatedSos.requestId,
+            originDeviceId = deviceId,
+            messageType = "EMERGENCY_SOS",
+            protocolVersion = SUPPORTED_PROTOCOL_VERSION,
+            createdAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + (24 * 3600 * 1000L),
+            hopCount = 1,
+            maxHops = MAX_ALLOWED_HOPS,
+            payload = payload,
+            integrity = MeshIntegrity(checksum = checksum)
+        )
+
+        val json = envelope.toJson()
+        val bytes = json.toByteArray(Charsets.UTF_8)
+
+        database.relayMessageDao().insertMessage(
+            RelayMessageEntity(
+                messageId = messageId,
+                requestId = updatedSos.requestId,
+                originDeviceId = deviceId,
+                hopCount = 1,
+                maxHops = MAX_ALLOWED_HOPS,
+                expiresAt = envelope.expiresAt,
+                rawJsonEnvelope = json,
+                status = "PENDING_FORWARD",
+                lastReceivedFromEndpointId = null,
+                forwardedEndpoints = ""
+            )
+        )
+
+        val connectedPeers = nearbyManager.connectedEndpoints.value
+        if (connectedPeers.isNotEmpty()) {
+            val session = OutgoingSosSession(
+                messageId = messageId,
+                requestId = updatedSos.requestId,
+                rawEnvelopeJson = json,
+                attempt = 1
+            )
+            activeOutgoingSessions[messageId] = session
+            startAckTimeout(session)
+
+            for (endpointId in connectedPeers) {
+                nearbyManager.sendTrackedPayload(
+                    endpointId = endpointId,
+                    bytes = bytes,
+                    onTransferSuccess = {
+                        Log.i(TAG, "Location update envelope $messageId sent to peer $endpointId")
+                    },
+                    onTransferFailure = { status ->
+                        Log.w(TAG, "Location update transfer to $endpointId failed ($status)")
+                    }
+                )
+            }
+        }
+        Log.i(TAG, "Updated and broadcast fresh location for $requestId: (${fix.latitude}, ${fix.longitude}) ±${fix.accuracy}m")
     }
 
     /**
@@ -381,6 +483,29 @@ class StoreAndForwardRelayEngine(
             Log.i(TAG, "Saved incoming mesh emergency ${envelope.requestId} to Room database (state: RECEIVED_BY_PEER)")
             receivedSos
         } else {
+            // Check if incoming payload has a newer valid location from the original sender
+            val incomingTimestamp = payload.locationTimestamp ?: envelope.createdAt
+            val existingTimestamp = existingSos.locationTimestamp ?: 0L
+            val hasValidIncomingCoords = EmergencyLocationManager.isValidCoordinates(payload.latitude, payload.longitude)
+            val isNewerLocation = hasValidIncomingCoords && (
+                existingSos.latitude == null ||
+                (incomingTimestamp >= existingTimestamp && payload.locationSource != "UNAVAILABLE")
+            )
+
+            if (isNewerLocation) {
+                val updatedSos = existingSos.copy(
+                    latitude = payload.latitude,
+                    longitude = payload.longitude,
+                    locationAccuracy = payload.locationAccuracy,
+                    locationAddress = payload.locationAddress ?: existingSos.locationAddress,
+                    locationTimestamp = incomingTimestamp,
+                    locationSource = payload.locationSource ?: "FRESH_GPS",
+                    updatedAt = System.currentTimeMillis()
+                )
+                database.sosDao().updateSos(updatedSos)
+                Log.i(TAG, "Updated existing incident ${envelope.requestId} with newer valid location from original sender: ${payload.latitude}, ${payload.longitude} (±${payload.locationAccuracy}m, time=$incomingTimestamp, source=${payload.locationSource})")
+            }
+
             if (!isTerminalOrRelayed(existingSos.deliveryState)) {
                 database.sosDao().updateDeliveryState(envelope.requestId, DeliveryState.RELAYED_TO_PEER.name)
             }
