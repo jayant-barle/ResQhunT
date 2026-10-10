@@ -19,6 +19,9 @@ interface SosDao {
     @Query("SELECT * FROM sos_requests WHERE requestId = :id LIMIT 1")
     suspend fun getSosById(id: String): SosEntity?
 
+    @Query("SELECT * FROM sos_requests WHERE requestId = :id LIMIT 1")
+    fun getSosByIdFlow(id: String): Flow<SosEntity?>
+
     @Query("SELECT * FROM sos_requests ORDER BY createdAt DESC")
     fun getAllSosFlow(): Flow<List<SosEntity>>
 

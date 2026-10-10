@@ -50,9 +50,11 @@ export const Navbar: React.FC = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
         {/* Brand */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emergency flex items-center justify-center shadow-lg shadow-red-900/40">
-            <Radio className="w-6 h-6 text-white animate-pulse" />
-          </div>
+          <img
+            src="/app-icon.png"
+            alt="ResQhunT App Icon"
+            className="w-10 h-10 rounded-xl shadow-md object-contain bg-white/10 p-0.5"
+          />
           <div>
             <div className="flex items-center gap-2">
               <span className="font-black text-xl tracking-tight text-white">ResQhunT</span>

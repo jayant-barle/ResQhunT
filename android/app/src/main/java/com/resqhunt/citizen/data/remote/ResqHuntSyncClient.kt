@@ -130,7 +130,9 @@ class ResqHuntSyncClient(
                     latitude = sos.latitude,
                     longitude = sos.longitude,
                     locationAccuracy = sos.locationAccuracy,
-                    locationAddress = sos.locationAddress
+                    locationAddress = sos.locationAddress,
+                    locationTimestamp = sos.locationTimestamp,
+                    locationSource = sos.locationSource
                 )
                 val rawContent = "${sos.requestId}:${sos.category}:${sos.severity}:${sos.affectedCount}:${sos.description}"
                 val checksum = MeshMessageEnvelope.calculateChecksum(rawContent)
