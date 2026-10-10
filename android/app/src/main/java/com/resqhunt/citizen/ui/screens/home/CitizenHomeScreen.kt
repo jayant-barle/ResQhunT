@@ -1,5 +1,6 @@
 package com.resqhunt.citizen.ui.screens.home
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,9 +17,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.resqhunt.citizen.R
 import com.resqhunt.citizen.data.local.AppDatabase
 import com.resqhunt.citizen.data.local.entity.SosEntity
 import com.resqhunt.citizen.ui.theme.*
@@ -56,19 +59,31 @@ fun CitizenHomeScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = "ResQhunT",
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Black,
-                    color = NavyPrimary
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.app_logo),
+                    contentDescription = "ResQhunT App Icon",
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(12.dp))
                 )
-                Text(
-                    text = "Citizen Emergency Terminal",
-                    fontSize = 12.sp,
-                    color = MutedGray,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Column {
+                    Text(
+                        text = "ResQhunT",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Black,
+                        color = NavyPrimary
+                    )
+                    Text(
+                        text = "Citizen Emergency Terminal",
+                        fontSize = 11.sp,
+                        color = MutedGray,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
             IconButton(
                 onClick = onNavigateToSettings,
