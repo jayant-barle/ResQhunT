@@ -18,5 +18,7 @@ data class RelayMessageEntity(
     val expiresAt: Long,
     val rawJsonEnvelope: String,
     val status: String, // PENDING_FORWARD, FORWARDED, SYNCED_SERVER, EXPIRED
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastReceivedFromEndpointId: String? = null,
+    val forwardedEndpoints: String = "" // Comma-separated endpoint IDs already forwarded to
 )

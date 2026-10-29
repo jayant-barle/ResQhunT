@@ -15,6 +15,8 @@ data class SosEntity(
     val longitude: Double? = null,
     val locationAccuracy: Float? = null,
     val locationAddress: String? = null,
+    val locationTimestamp: Long? = null,
+    val locationSource: String? = null, // FRESH_GPS, LAST_KNOWN, MANUAL, UNAVAILABLE
     val deliveryState: String, // CREATED, STORED_LOCALLY, RELAY_PENDING, RELAYED_TO_PEER, SERVER_RECEIVED, etc.
     val priorityScore: Float,
     val priorityCategory: String,

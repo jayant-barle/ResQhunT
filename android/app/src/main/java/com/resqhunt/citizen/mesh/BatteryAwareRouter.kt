@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
+import androidx.core.content.ContextCompat
 
 class BatteryAwareRouter(private val context: Context) {
 
@@ -15,7 +16,16 @@ class BatteryAwareRouter(private val context: Context) {
 
     fun getBatteryStatus(): BatteryStatus {
         val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        val batteryIntent = context.registerReceiver(null, filter)
+        val batteryIntent = try {
+            ContextCompat.registerReceiver(
+                context,
+                null,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        } catch (e: Exception) {
+            null
+        }
 
         val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1

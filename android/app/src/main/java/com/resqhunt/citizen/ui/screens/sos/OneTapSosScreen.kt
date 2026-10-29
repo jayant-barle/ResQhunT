@@ -1,6 +1,12 @@
 package com.resqhunt.citizen.ui.screens.sos
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.resqhunt.citizen.ResQhunTApp
 import com.resqhunt.citizen.data.local.AppDatabase
 import com.resqhunt.citizen.data.local.entity.SosEntity
 import com.resqhunt.citizen.domain.model.DeliveryState
@@ -33,6 +40,7 @@ import com.resqhunt.citizen.service.SosRelayForegroundService
 import com.resqhunt.citizen.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 import java.util.UUID
 
 @Composable
@@ -43,6 +51,8 @@ fun OneTapSosScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val app = context.applicationContext as ResQhunTApp
+    val locationManager = app.locationManager
     val coroutineScope = rememberCoroutineScope()
 
     var selectedCategory by remember { mutableStateOf(EmergencyCategory.MEDICAL) }
@@ -50,6 +60,34 @@ fun OneTapSosScreen(
     var affectedCount by remember { mutableIntStateOf(2) }
     var description by remember { mutableStateOf("Immediate medical assistance required, injuries sustained") }
     var manualLocation by remember { mutableStateOf("") }
+
+    val currentFix by locationManager.currentFix.collectAsState()
+    var hasPermission by remember { mutableStateOf(locationManager.hasLocationPermission()) }
+    var isApproximate by remember { mutableStateOf(locationManager.isApproximateOnly()) }
+    var isGpsEnabled by remember { mutableStateOf(locationManager.isLocationEnabled()) }
+    var isLocAcquiring by remember { mutableStateOf(false) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        hasPermission = locationManager.hasLocationPermission()
+        isApproximate = locationManager.isApproximateOnly()
+        isGpsEnabled = locationManager.isLocationEnabled()
+        coroutineScope.launch {
+            isLocAcquiring = true
+            locationManager.acquireCurrentOrLastKnownLocation(3000L)
+            isLocAcquiring = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        hasPermission = locationManager.hasLocationPermission()
+        isApproximate = locationManager.isApproximateOnly()
+        isGpsEnabled = locationManager.isLocationEnabled()
+        isLocAcquiring = true
+        locationManager.acquireCurrentOrLastKnownLocation(2500L)
+        isLocAcquiring = false
+    }
 
     // Accidental Activation Cancellation State
     var isCountingDown by remember { mutableStateOf(false) }
@@ -71,29 +109,60 @@ fun OneTapSosScreen(
                 createdAtTimestampMs = System.currentTimeMillis()
             )
 
+            // Step 1: Obtain genuine location from EmergencyLocationManager (never fabricate coordinates or 0,0)
+            val cachedFix = locationManager.getBestCachedFix()
+            val lat: Double? = cachedFix?.latitude
+            val lon: Double? = cachedFix?.longitude
+            val acc: Float? = cachedFix?.accuracy
+            val locTimestamp: Long? = cachedFix?.timestamp
+            val locSource: String = cachedFix?.source ?: "UNAVAILABLE"
+            val locAddress: String = if (lat != null && lon != null) {
+                manualLocation.ifBlank { "Coordinates Locked ($locSource)" }
+            } else {
+                manualLocation.ifBlank { "Location unavailable" }
+            }
+
             val sosEntity = SosEntity(
                 requestId = newRequestId,
                 category = selectedCategory.name,
                 severity = selectedSeverity.name,
                 affectedCount = affectedCount,
                 description = description,
-                latitude = 28.6139, // Simulated/acquired coordinate
-                longitude = 77.2090,
-                locationAccuracy = 10.0f,
-                locationAddress = manualLocation.ifBlank { "Connaught Place Sector 4" },
+                latitude = lat,
+                longitude = lon,
+                locationAccuracy = acc,
+                locationAddress = locAddress,
+                locationTimestamp = locTimestamp,
+                locationSource = locSource,
                 deliveryState = DeliveryState.STORED_LOCALLY.name,
                 priorityScore = evaluation.priorityScore,
                 priorityCategory = evaluation.priorityCategory.name
             )
 
-            // Step 1: Persist to Room local database before doing anything
+            // Step 2: Persist to Room local database before doing anything
             database.sosDao().insertSos(sosEntity)
 
-            // Step 2: Hand off to mesh store-and-forward engine
+            // Step 3: Hand off to mesh store-and-forward engine
             relayEngine.createAndBroadcastSos(sosEntity)
 
-            // Step 3: Start foreground service for active beacon
+            // Step 4: Start foreground service for active beacon
             SosRelayForegroundService.start(context)
+
+            // Step 5: Asynchronously acquire fresh high-accuracy GPS fix with timeout (never blocking SOS dispatch)
+            coroutineScope.launch {
+                try {
+                    if (locationManager.hasLocationPermission() && locationManager.isLocationEnabled()) {
+                        Log.d("OneTapSosScreen", "Acquiring background fresh high-accuracy fix for $newRequestId...")
+                        val freshFix = locationManager.acquireCurrentOrLastKnownLocation(maxWaitMs = 5000L)
+                        if (freshFix != null) {
+                            relayEngine.updateSosLocationAndBroadcast(newRequestId, freshFix)
+                            Log.i("OneTapSosScreen", "Updated and broadcasted fresh fix for $newRequestId (${freshFix.latitude}, ${freshFix.longitude})")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("OneTapSosScreen", "Background GPS update exception: ${e.message}")
+                }
+            }
 
             isCountingDown = false
             onSosTriggered(newRequestId)
@@ -121,8 +190,8 @@ fun OneTapSosScreen(
             Spacer(modifier = Modifier.width(48.dp))
         }
 
-        // Category Picker
-        Text("Select Emergency Category", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = InkText)
+        // Category Selection
+        Text("Emergency Type", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -150,8 +219,8 @@ fun OneTapSosScreen(
             }
         }
 
-        // Severity Selector
-        Text("Declared Severity Level", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = InkText)
+        // Severity Selection
+        Text("Severity Level", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -161,31 +230,34 @@ fun OneTapSosScreen(
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = if (isSelected) {
-                        if (sev == SeverityLevel.CRITICAL) EmergencyRed else NavyPrimary
+                        when (sev) {
+                            SeverityLevel.CRITICAL -> EmergencyRed
+                            SeverityLevel.HIGH -> Color(0xFFE65100)
+                            SeverityLevel.MEDIUM -> Color(0xFFF57C00)
+                            SeverityLevel.LOW -> TealAccent
+                        }
                     } else CardSurface,
                     modifier = Modifier
                         .weight(1f)
                         .clickable { selectedSeverity = sev }
-                        .border(
-                            1.dp,
-                            if (isSelected) Color.Transparent else Color.LightGray,
-                            RoundedCornerShape(12.dp)
-                        )
+                        .border(1.dp, if (isSelected) Color.Transparent else Color.LightGray, RoundedCornerShape(12.dp))
                 ) {
-                    Text(
-                        text = sev.name,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isSelected) Color.White else InkText,
-                        modifier = Modifier
-                            .padding(vertical = 10.dp)
-                            .wrapContentWidth(Alignment.CenterHorizontally)
-                    )
+                    Column(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = sev.name,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSelected) Color.White else InkText
+                        )
+                    }
                 }
             }
         }
 
-        // Affected Person Stepper
+        // Affected Count Stepper
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = CardSurface)
@@ -216,6 +288,143 @@ fun OneTapSosScreen(
                         modifier = Modifier.size(36.dp)
                     ) {
                         Text("+", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = NavyPrimary)
+                    }
+                }
+            }
+        }
+
+        // Genuine GPS Rescue Location Card
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardSurface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = if (currentFix != null) EmergencyRed else MutedGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text("Rescue Location Lock", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = NavyPrimary)
+                    }
+
+                    if (currentFix != null) {
+                        val fix = currentFix!!
+                        val badgeColor = when {
+                            fix.isFresh -> TealDark
+                            fix.isApproximate -> Color(0xFFE65100)
+                            else -> Color(0xFFF57C00)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = badgeColor.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = fix.source,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                                color = badgeColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (!hasPermission) {
+                    Text(
+                        text = "Location permission is required to embed exact coordinates into your emergency beacon.",
+                        fontSize = 11.sp,
+                        color = EmergencyRed
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            permissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().height(36.dp)
+                    ) {
+                        Text("Grant Location Permission", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else if (!isGpsEnabled) {
+                    Text(
+                        text = "Device Location Services are disabled. Device cannot acquire satellite lock.",
+                        fontSize = 11.sp,
+                        color = Color(0xFFE65100)
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().height(36.dp)
+                    ) {
+                        Text("Enable Location in Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else if (currentFix != null) {
+                    val fix = currentFix!!
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Coordinates:", fontSize = 11.sp, color = MutedGray)
+                        Text(
+                            String.format(Locale.US, "%.6f°, %.6f°", fix.latitude, fix.longitude),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = NavyPrimary
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Accuracy:", fontSize = 11.sp, color = MutedGray)
+                        Text(
+                            "± ${String.format(Locale.US, "%.1f", fix.accuracy)} meters",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TealDark
+                        )
+                    }
+
+                    if (isApproximate) {
+                        Text(
+                            text = "Note: Approximate location granted. Precise location recommended for exact building/room pinpointing.",
+                            fontSize = 10.sp,
+                            color = Color(0xFFE65100),
+                            lineHeight = 14.sp
+                        )
+                        TextButton(
+                            onClick = {
+                                permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION))
+                            },
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("Upgrade to Precise Location", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = NavyPrimary)
+                        }
+                    }
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (isLocAcquiring) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = NavyPrimary)
+                        }
+                        Text(
+                            text = if (isLocAcquiring) "Acquiring GPS satellite fix..." else "No recent GPS lock. SOS will transmit and acquire fix in background.",
+                            fontSize = 11.sp,
+                            color = MutedGray
+                        )
                     }
                 }
             }
